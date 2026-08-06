@@ -204,11 +204,16 @@ static int binary_search(struct entry **sequence, int longest,
  * item per sequence length: the sequence with the smallest last
  * element (in terms of line2).
  */
-static struct entry *find_longest_common_sequence(struct hashmap *map)
+static struct entry *find_longest_common_sequence(struct hashmap *map,
+		int *error)
 {
 	struct entry **sequence = xdl_malloc(map->nr * sizeof(struct entry *));
 	int longest = 0, i;
 	struct entry *entry;
+	if (!sequence) {
+		*error = -1;
+		return NULL;
+	}
 
 	/*
 	 * If not -1, this entry in sequence must never be overridden.
@@ -366,7 +371,11 @@ static int patience_diff(mmfile_t *file1, mmfile_t *file2,
 		return 0;
 	}
 
-	first = find_longest_common_sequence(&map);
+	first = find_longest_common_sequence(&map, &result);
+	if (result < 0) {
+		xdl_free(map.entries);
+		return result;
+	}
 	if (first)
 		result = walk_common_sequence(&map, first,
 			line1, count1, line2, count2);
@@ -381,10 +390,14 @@ static int patience_diff(mmfile_t *file1, mmfile_t *file2,
 int xdl_do_patience_diff(mmfile_t *file1, mmfile_t *file2,
 		xpparam_t const *xpp, xdfenv_t *env)
 {
+	int result;
+
 	if (xdl_prepare_env(file1, file2, xpp, env) < 0)
 		return -1;
 
-	/* environment is cleaned up in xdl_diff() */
-	return patience_diff(file1, file2, xpp, env,
+	result = patience_diff(file1, file2, xpp, env,
 			1, env->xdf1.nrec, 1, env->xdf2.nrec);
+	if (result < 0)
+		xdl_free_env(env);
+	return result;
 }

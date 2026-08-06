@@ -458,10 +458,16 @@ static int xdl_trim_ends(xdfile_t *xdf1, xdfile_t *xdf2) {
 			break;
 
 	xdf1->dstart = xdf2->dstart = i;
+	lim -= i;
+	if (lim == 0) {
+		xdf1->dend = xdf1->nrec - 1;
+		xdf2->dend = xdf2->nrec - 1;
+		return 0;
+	}
 
 	recs1 = xdf1->recs + xdf1->nrec - 1;
 	recs2 = xdf2->recs + xdf2->nrec - 1;
-	for (lim -= i, i = 0; i < lim; i++, recs1--, recs2--)
+	for (i = 0; i < lim; i++, recs1--, recs2--)
 		if ((*recs1)->ha != (*recs2)->ha)
 			break;
 

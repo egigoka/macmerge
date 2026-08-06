@@ -45,6 +45,8 @@
 #include "xtypes.h"
 #include "xdiff.h"
 
+#include <stdint.h>
+
 #define MAX_PTR	UINT_MAX
 #define MAX_CNT	UINT_MAX
 
@@ -78,6 +80,15 @@ struct region {
 	unsigned int begin1, end1;
 	unsigned int begin2, end2;
 };
+
+static int checked_allocation_size(size_t count, size_t item_size,
+		size_t *result)
+{
+	if (item_size && count > SIZE_MAX / item_size)
+		return -1;
+	*result = count * item_size;
+	return 0;
+}
 
 #define LINE_MAP(i, a) (i->line_map[(a) - i->ptr_shift])
 
@@ -256,7 +267,8 @@ static int find_lcs(xpparam_t const *xpp, xdfenv_t *env,
 		    int line1, int count1, int line2, int count2)
 {
 	int b_ptr;
-	int sz, ret = -1;
+	size_t sz;
+	int ret = -1;
 	struct histindex index;
 
 	memset(&index, 0, sizeof(index));
@@ -270,20 +282,29 @@ static int find_lcs(xpparam_t const *xpp, xdfenv_t *env,
 	index.rcha.head = NULL;
 
 	index.table_bits = xdl_hashbits(count1);
-	sz = index.records_size = 1 << index.table_bits;
-	sz *= sizeof(struct record *);
+	if (index.table_bits >= sizeof(index.records_size) * CHAR_BIT)
+		goto cleanup;
+	index.records_size = 1U << index.table_bits;
+	if (checked_allocation_size(index.records_size,
+			sizeof(struct record *), &sz) < 0)
+		goto cleanup;
 	if (!(index.records = (struct record **) xdl_malloc(sz)))
 		goto cleanup;
 	memset(index.records, 0, sz);
 
-	sz = index.line_map_size = count1;
-	sz *= sizeof(struct record *);
+	if (count1 < 0)
+		goto cleanup;
+	index.line_map_size = (unsigned int)count1;
+	if (checked_allocation_size(index.line_map_size,
+			sizeof(struct record *), &sz) < 0)
+		goto cleanup;
 	if (!(index.line_map = (struct record **) xdl_malloc(sz)))
 		goto cleanup;
 	memset(index.line_map, 0, sz);
 
-	sz = index.line_map_size;
-	sz *= sizeof(unsigned int);
+	if (checked_allocation_size(index.line_map_size,
+			sizeof(unsigned int), &sz) < 0)
+		goto cleanup;
 	if (!(index.next_ptrs = (unsigned int *) xdl_malloc(sz)))
 		goto cleanup;
 	memset(index.next_ptrs, 0, sz);
@@ -377,10 +398,15 @@ out:
 int xdl_do_histogram_diff(mmfile_t *file1, mmfile_t *file2,
 	xpparam_t const *xpp, xdfenv_t *env)
 {
+	int result;
+
 	if (xdl_prepare_env(file1, file2, xpp, env) < 0)
 		return -1;
 
-	return histogram_diff(xpp, env,
+	result = histogram_diff(xpp, env,
 		env->xdf1.dstart + 1, env->xdf1.dend - env->xdf1.dstart + 1,
 		env->xdf2.dstart + 1, env->xdf2.dend - env->xdf2.dstart + 1);
+	if (result < 0)
+		xdl_free_env(env);
+	return result;
 }

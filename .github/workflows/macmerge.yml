@@ -1,0 +1,61 @@
+name: MacMerge
+
+on:
+  push:
+    branches: [master, macos-port]
+    paths:
+      - "MacMerge/**"
+      - "Externals/xdiff/**"
+      - ".github/workflows/macmerge.yml"
+      - "todo.md"
+  pull_request:
+    branches: [master]
+    paths:
+      - "MacMerge/**"
+      - "Externals/xdiff/**"
+      - ".github/workflows/macmerge.yml"
+      - "todo.md"
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: MacMerge
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Test
+        run: swift test -Xswiftc -warnings-as-errors
+
+      - name: Test native core with Address Sanitizer
+        run: swift test --sanitize address -Xswiftc -warnings-as-errors
+
+      - name: Build release
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      - name: Package application
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: Scripts/package-app.sh
+
+      - name: Verify application bundle
+        run: |
+          plutil -lint dist/MacMerge.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 dist/MacMerge.app
+          test -x dist/MacMerge.app/Contents/MacOS/MacMerge
+
+      - name: Create artifact
+        run: ditto -c -k --keepParent dist/MacMerge.app dist/MacMerge.zip
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacMerge-${{ runner.arch }}
+          path: MacMerge/dist/MacMerge.zip
+          if-no-files-found: error

@@ -151,7 +151,7 @@ long xdl_guess_lines(mmfile_t *mf, long sample) {
 			nl++;
 			while (cur < top && !is_eol(cur, top))
 				cur++;
-			if (is_eol(cur, top))
+			if (cur < top && is_eol(cur, top))
 				cur++;
 		}
 		tsize += (long) (cur - data);
@@ -165,15 +165,28 @@ long xdl_guess_lines(mmfile_t *mf, long sample) {
 
 int xdl_blankline(const char *line, long size, long flags)
 {
+	long content_size = size;
 	long i;
 
-	if (!(flags & XDF_WHITESPACE_FLAGS))
-		return (size <= 1);
+	switch (eol_type(line, size)) {
+	case EOL_CRLF:
+		content_size -= 2;
+		break;
+	case EOL_LF:
+	case EOL_CR:
+		content_size--;
+		break;
+	case EOL_NONE:
+		break;
+	}
 
-	for (i = 0; i < size && XDL_ISSPACE(line[i]); i++)
+	if (!(flags & XDF_WHITESPACE_FLAGS))
+		return content_size == 0;
+
+	for (i = 0; i < content_size && XDL_ISSPACE(line[i]); i++)
 		;
 
-	return (i == size);
+	return i == content_size;
 }
 
 /*
