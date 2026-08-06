@@ -58,12 +58,158 @@ Acceptance: user can compare and synchronize realistic directory trees without b
 - [-] Add document windows, recent items, drag and drop, and Finder Open With support (initial and subsequent Open With complete).
 - [-] Add WinMerge-style toolbar command parity; track every command in the audit below.
 - [x] Create editable two-pane untitled text comparisons and save scratchpads with Save As.
-- [ ] Add native menus, keyboard shortcuts, toolbar customization, and settings.
+- [-] Add native menus, keyboard shortcuts, toolbar customization, and settings (comparison Settings scene and primary command shortcuts added; complete menus/customization/persistence pending).
 - [ ] Add syntax highlighting and configurable colors and fonts.
 - [ ] Restore window layouts and comparison sessions.
 - [ ] Meet VoiceOver, keyboard navigation, contrast, and localization requirements.
 
 Acceptance: app behaves like first-class document-based macOS software.
+
+## Windows-to-Mac UI Parity Ledger
+
+Baseline audited: 2026-08-06. This ledger covers every user-visible Windows UI family found in `Src/Merge.rc`, `Src/Merge2.rc`, `Src/resource.h`, and their owning frame, view, document, dialog, and property-page classes. Resource presence alone does not prove parity: runtime handlers and update handlers define behavior and enabled state.
+
+Status vocabulary:
+
+- `MATCH`: same user-visible behavior and state contract.
+- `MAC_ADAPTATION`: same user outcome through documented native macOS behavior.
+- `PARTIAL`: usable implementation exists, but behavior, state, accessibility, persistence, or tests are incomplete.
+- `MISSING`: no usable implementation exists; permanently disabled placeholders count as missing.
+- `N/A`: Windows-only mechanism has no macOS meaning; any portable user outcome needs a separate adaptation row.
+
+A row is complete only after placement, action wiring, result, enablement, check/radio state, dynamic text, shortcut, help, accessibility, persistence, model tests, UI tests, AX tests, and installed-app smoke tests pass in every applicable state.
+
+### Source hierarchy
+
+- [x] Toolbar order and grouping: `Src/Merge2.rc` `IDR_MAINFRAME` lines 63-104.
+- [x] Main and contextual menu hierarchy: `Src/Merge.rc` `IDR_MAINFRAME`, `IDR_DIRDOCTYPE`, `IDR_MERGEDOCTYPE`, and every `IDR_POPUP_*` resource.
+- [x] Keyboard commands: `Src/Merge.rc` `IDR_MAINFRAME` and `IDR_MERGEDOCTYPE` accelerator tables.
+- [x] Dialog and property-page inventory: every `IDD_*` resource in `Src/Merge.rc` and `Src/resource.h`.
+- [x] Actual action and validation semantics: MFC message maps plus `ON_COMMAND` and `ON_UPDATE_COMMAND_UI` handlers.
+- [x] Windows rendered and interaction evidence: `Testing/GoogleTest/GUITests` and manual documentation.
+- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, `MacMerge/Tests`, packaged `.app` AX snapshots, and installed-app smoke tests.
+
+### Required state matrix
+
+- [ ] Comparison lifecycle: empty, one side loaded, loading, current, stale, refreshing, failed, and canceled.
+- [ ] Result: identical, different without selection, first/middle/last selected, cursor on a difference, and selection offscreen.
+- [ ] Documents: both files, mixed file/scratchpad, both scratchpads, each dirty combination, save failure, external change, and missing disk file.
+- [ ] Editability: left/right/both read-only, editable destination, and text editor owning focus.
+- [ ] Pane shape: two-way, three-way, active left/middle/right, swapped, vertical, and horizontal.
+- [ ] Folder selection: none, one, many, mixed file/folder, missing side, identical, different, filtered, and hidden.
+- [ ] Window state: key/background, multiple windows, tabs, narrow toolbar, restored session, and full-screen.
+- [ ] Invocation: primary click, secondary arrow, menu item, shortcut, keyboard traversal, VoiceOver action, and disabled activation.
+
+### Application shell and opening
+
+- [PARTIAL] `IDR_MAINFRAME`: main application window, native menu bar, command strip, one comparison window, and status strip exist; multiple document windows/tabs, restorable sessions, output pane, and complete status state are missing.
+- [MISSING] `IDD_OPEN`: unified Select Files or Folders view with two/three paths, read-only flags, swaps, browse/history, filter, recurse, unpacker/prediffer, comparison options, project save, and Compare split button.
+- [PARTIAL] `IDR_POPUP_NEW`: two-pane Text exists; Table, Binary, Image, Webpage, Folder, every three-pane mode, and split-button secondary actions are missing.
+- [PARTIAL] `IDR_POPUP_OPEN` and `IDR_POPUP_BROWSE`: native pair picker and per-side replacement exist; recent pairs, path history, project/conflict/clipboard variants, and split-button behavior are missing.
+- [MAC_ADAPTATION] Windows common file/folder pickers: use `NSOpenPanel`, `NSSavePanel`, and Finder document events while preserving pair selection, cancellation, validation, and security-scoped access.
+- [PARTIAL] Drag/drop and shell opening: Finder Open With works initially and while running; direct pane drop, pair drop, replacement drop, and Finder Services are missing.
+
+### Compare workspaces
+
+- [PARTIAL] `IDR_MERGEDOCTYPE` text compare: two editable panes, alignment, line numbers, synchronized scrolling, row and intra-line highlighting, merge, save, and encoding safety exist; three-way text, moved blocks, word-diff model, syntax, margins, and complete view commands are missing.
+- [MISSING] Table Compare and `IDD_OPEN_TABLE`: spreadsheet rendering, table header/filter menu, delimiters, quote/newline settings, and table-specific options.
+- [MISSING] Hex/Binary Compare: native hex panes, byte editing, binary find/replace/go-to, character sets, per-pane status, and binary settings.
+- [MISSING] Image Compare: multipage panes, location/tool pane, differences, block size, threshold, insertion detection, transforms, zoom, overlay, wipe, animation, OCR, and image status.
+- [MISSING] Webpage Compare: browser panes, location/tool pane, screenshot/HTML/text/resource modes, viewport presets, synchronized events, browsing-data controls, and dependency handling.
+- [MISSING] Folder Compare: recursive scan, table/tree results, state icons, columns, filters, sorting, method selection, file actions, progress/pause/cancel, and file-pair opening.
+
+### Main menus and command surfaces
+
+- [PARTIAL] File menu: New Text, pair Open, Save/Save Left/Save Right, Reload, and guarded Quit exist; all remaining `IDR_MERGEDOCTYPE` File commands are mapped in the command audits below.
+- [PARTIAL] Edit menu: native field editing, model undo/redo, Select Line Difference, and Options exist; focus-routed history, previous line-difference selection, search, markers, numbered copy, bookmarks, and go-to are missing.
+- [MISSING] View menu: font, zoom, syntax, diff context, whitespace/EOL/line differences/numbers/margins/wrap, pane swap/split/lock, toolbar choices, and dockable pane visibility.
+- [PARTIAL] Merge menu: two-way navigation and copying exist; cursor/current behavior, conflicts, three-way commands, Auto Merge, selected-line operations, and synchronization points are incomplete.
+- [MISSING] Tools menu: Filters, Generate Patch, Generate Report, and Generate Archive.
+- [MISSING] Plugins menu: settings, prediffers, unpackers, editor/copy scripts, transforms, and reload.
+- [PARTIAL] Window menu: native close/minimize/zoom exists; multiple comparison windows/tabs, pane focus, split, and document arrangement are missing.
+- [MISSING] Help menu: Help Book, release notes, translations, configuration report, GPL, contributors, and complete About content.
+- [PARTIAL] `IDR_MAINFRAME` toolbar: implemented commands use compact icons; exact command contract remains governed by the Toolbar Command Audit.
+- [MISSING] Toolbar visibility, None/Small/Medium/Big/Huge sizes, native overflow, customization, reset, and persistence.
+- [PARTIAL] Text editor context menu matches WinMerge's two-pane order and routes merge, selected-diff clipboard, line-difference, undo/redo, editing, and native file opening; selected-line merge, filters, scripts, go-to, shell, and other workspace context menus remain missing.
+- [PARTIAL] Accelerators: native document shortcuts and some Option/Command merge shortcuts exist; full accelerator parity and focus-safety tests are missing.
+
+### Bars, panes, and status surfaces
+
+- [MISSING] MDI/document tab bar and tab context menu; replace with native windows/tabs while preserving dirty state, close-other/left/right, width, and restoration outcomes.
+- [PARTIAL] `IDD_EDITOR_HEADERBAR`: side caption, filename, dirty state, open, and save exist; editable path, history, read-only, clipboard, plugin state, and header context menu are missing.
+- [MISSING] Location Pane: whole-file map, moved blocks, click navigation, and context menu.
+- [MISSING] Diff/Detail Pane: selected word/character difference detail and merge controls driven by the same intra-line model.
+- [MISSING] Output Pane: message log plus Copy, Select All, Clear All, visibility, and persistence.
+- [MISSING] `IDD_DISPLAY_FILTER_BAR`: expression, history/presets, apply/close, text/folder variants, and restoration.
+- [PARTIAL] `IDD_ENCODINGERROR`: explicit encoding selection and safe failures exist as dialogs; recovery bar, unpacker, and hex alternatives are missing.
+- [PARTIAL] Global status: processing/result, difference count, and filenames exist; plugin, merge mode, current difference, and command prompts are missing.
+- [MISSING] Per-pane text/table status: line, column, character, selection, encoding, BOM, EOL, and read-only state with click actions.
+- [MISSING] Folder, hex, image, and web mode-specific status surfaces.
+
+### Dialog inventory
+
+- [PARTIAL] `IDD_ABOUTBOX`: native About shell exists; WinMerge version detail, contributors, license, links, and credits are missing.
+- [PARTIAL] `IDD_SAVECLOSING`: native save/discard/cancel adaptation exists; independent per-side choices and UI tests are missing.
+- [PARTIAL] `IDD_LOAD_SAVE_CODEPAGE` and `IDD_ENCODINGERROR`: ambiguity selection exists; pane scope, load/save code pages, BOM controls, and recovery actions are incomplete.
+- [MISSING] `IDD_EDIT_FIND`, `IDD_EDIT_REPLACE`, `IDD_EDIT_MARKER`, and `IDD_WMGOTO`.
+- [MISSING] `IDD_DIRCOLS`, `IDD_DIRADDITIONALPROPS`, `IDD_DIRCOMP_PROGRESS`, `IDD_CONFIRM_COPY`, `IDD_SELECT_FILES_OR_FOLDERS`, `IDD_COMPARE_STATISTICS`, and `IDD_COMPARE_STATISTICS3`.
+- [MISSING] `IDD_GENERATE_PATCH`, `IDD_DIRCMP_REPORT`, `IDD_FILECMP_REPORT`, and `IDD_ARCHIVE`.
+- [MISSING] `IDD_FILTERS_LINEFILTERS`, `IDD_FILTERS_SUBSTITUTIONFILTERS`, `IDD_FILTERS_FILEFILTERS`, `IDD_FILTERS_CONDITION`, `IDD_COMPARISON_RESULT_FILTER`, `IDD_FILTERS_MATCHINSIDE`, shared/private filter, and test-filter dialogs.
+- [MISSING] `IDD_PLUGINS_SELECTPLUGIN`, `IDD_PLUGINS_LIST`, and `IDD_PLUGINS_EDITPLUGIN`.
+- [MISSING] `IDD_DIALOG_WINDOWSMANAGER`, `IDD_INPUTBOX`, reusable translated message-box behavior, and dark font/color chooser adaptations.
+
+### Preferences and settings
+
+- [PARTIAL] `IDD_PREFERENCES`: native comparison Settings scene drives recomparison; category navigation, Import, Export, Reset, Help, validation, and persistence are missing.
+- [MISSING] General, System, Message Boxes, Project, Archive, Backup, Codepage, and Shell/Jump List pages.
+- [MISSING] Compare Text, Folder, Table, Binary, Image, and Webpage pages.
+- [MISSING] Editor General, Compare/Merge, and Syntax pages.
+- [MISSING] Color Schemes, Differences, Syntax, Text/Selection, Markers, Folder, and System color pages.
+
+### Project, conflict, clipboard, shell, and recent flows
+
+- [MISSING] Project open/save, project comparison options, recent projects, and restoration.
+- [MISSING] Conflict parser and Base/Theirs/Mine comparison with conflict navigation.
+- [MISSING] Clipboard text/image comparison and clipboard history menus.
+- [MAC_ADAPTATION] Explorer registered editor/Open With/parent/shell menus: use Finder Open With, Reveal in Finder, Share/Services, and native file actions.
+- [MISSING] Native recent documents plus WinMerge-compatible recent pair/folder history.
+- [MISSING] Windows Jump List outcome: expose recent comparisons and common tasks through native recents, Dock menu, and app shortcuts where appropriate.
+
+### Reports, patch, archive, filters, plugins, and scripts
+
+- [MISSING] File and folder comparison reports with formats, clipboard output, linked file reports, and open-after-generation.
+- [MISSING] Patch Generator with file selection, style/context, append, clipboard, command line, and external editor.
+- [MISSING] Archive Generator with report/patch/project inclusion and file/clipboard output.
+- [MISSING] Filters property sheet, file/line/substitution editors, condition builders, comparison-result filters, and expression helper menus.
+- [MISSING] Plugin manager/editor/selector, unpacker/prediffer selection, automatic/manual modes, editor/copy scripts, macros, settings, and reload.
+- [UNKNOWN] Plugin architecture adaptation: define a sandboxed, permission-aware extension model or document intentional unsupported scope before implementation.
+
+### Navigation, merge, and pane controls
+
+- [PARTIAL] First/Current/Previous/Next/Last Difference: first/previous/next/last exist; Current and cursor-relative rules are in progress.
+- [MISSING] Next/Previous Conflict and all three-way pair-specific or side-only navigation.
+- [PARTIAL] Copy Left/Right, Copy-and-Advance, and Copy All exist; cursor fallback, multi-difference selection, selected-line copy, read-only targets, and Auto Merge are incomplete.
+- [MISSING] First/Previous/Next/Last compared-file navigation from folder results.
+- [MISSING] Add/Clear Synchronization Point, bookmarks, go-to definition, moved-line navigation, pane swap, pane lock, pane focus, and dynamic split controls.
+
+### Accessibility, persistence, and test completion
+
+- [PARTIAL] Existing file controls, toolbar controls, summary, rows, editors, and selected state expose basic AX metadata.
+- [ ] Add unique role, label, value, hint, enabled/check/selection state, focus order, actions, and announcements to every control and dynamic result.
+- [ ] Verify Full Keyboard Access, VoiceOver activation, increased contrast, differentiate-without-color, dark mode, and localization expansion.
+- [MISSING] Persist preferences, window frames/tabs, panes, toolbar, recents, bookmarks, comparison sessions, and sandbox access.
+- [PARTIAL] Model/core tests cover current text operations; command-contract, menu, toolbar, dialog, AX, persistence, screenshot, and installed-app smoke suites are incomplete.
+- [ ] Every completed ledger row must cite model/unit, UI interaction, semantic AX, persistence if stateful, and packaged-app smoke evidence.
+
+### Intentional macOS adaptations
+
+- [MAC_ADAPTATION] MFC dialogs become native panels, alerts, sheets, and Settings scenes without changing outcomes.
+- [MAC_ADAPTATION] Bitmap toolbar art becomes SF Symbols or native assets while command identity, order, grouping, and help remain equivalent.
+- [MAC_ADAPTATION] MDI tile/cascade becomes native document windows and tabs; preserve comparison switching, close variants, dirty state, and restoration.
+- [MAC_ADAPTATION] Registry/profile state becomes typed `UserDefaults`, scene restoration, document state, and security-scoped bookmarks.
+- [MAC_ADAPTATION] Recycle Bin operations become Move to Trash with equivalent confirmation and recovery expectations.
+- [MAC_ADAPTATION] CHM help becomes a macOS Help Book with web fallback and contextual anchors.
+- [N/A] COM automation has no default Mac replacement; add a separate automation requirement only if approved.
 
 ## Toolbar Command Audit
 
@@ -84,15 +230,15 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] `ID_FILE_NEW3_IMAGE`: create a three-pane image comparison.
 - [ ] `ID_FILE_NEW3_WEBPAGE`: create a three-pane webpage comparison.
 - [ ] `ID_FILE_NEW3_FOLDER`: create a three-pane folder comparison.
-- [-] `ID_FILE_OPEN`: replace the left or right file; add WinMerge's single Open dialog and recent-path behavior.
-- [ ] `ID_FILE_OPEN`: present a split-button/menu indicator for secondary Open actions.
+- [-] `ID_FILE_OPEN`: pair-level primary picker and left/right replacement exist; add WinMerge's full Open view and recent-path behavior.
+- [x] `ID_FILE_OPEN`: present a split-button/menu indicator for pair Open plus left/right replacement actions.
 - [ ] `ID_FILE_OPENCONFLICT`: open and parse a conflict file.
 - [ ] `ID_FILE_OPENCLIPBOARD`: compare clipboard contents.
 - [ ] `ID_FILE_OPENPROJECT`: open a WinMerge project.
 - [ ] `ID_FILE_SAVEPROJECT`: save a comparison project.
 - [ ] Recent files/folders: expose native recent items and WinMerge-compatible pair history.
 - [x] `ID_FILE_SAVE`: save all dirty loaded sides and request destinations for untitled sides.
-- [ ] `ID_FILE_SAVE`: present secondary Save actions from the toolbar button.
+- [x] `ID_FILE_SAVE`: present secondary Save Left/Right actions from the toolbar button.
 - [x] `ID_FILE_SAVE_LEFT`: save only the left side.
 - [x] `ID_FILE_SAVE_RIGHT`: save only the right side.
 - [ ] `ID_FILE_SAVE_MIDDLE`: save the middle side when three-pane comparison exists.
@@ -106,7 +252,7 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 
 - [x] `ID_EDIT_UNDO`: undo latest merge mutation with bounded history.
 - [x] `ID_EDIT_REDO`: redo latest reverted merge mutation.
-- [ ] `ID_SELECTLINEDIFF`: select the intra-line difference at the current line.
+- [x] `ID_SELECTLINEDIFF`: select the intra-line difference at the current line in the active pane; toolbar, Edit menu, and `F4` share model state.
 - [ ] `ID_SELECTPREVLINEDIFF`: select the previous intra-line difference.
 - [ ] Verify Undo/Redo button and Edit menu state against focused text editing versus comparison merge history.
 
@@ -117,12 +263,12 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] `ID_NEXTCONFLICT`: select and reveal the next three-way conflict.
 - [ ] `ID_PREVCONFLICT`: select and reveal the previous three-way conflict.
 - [x] `ID_FIRSTDIFF`: select and reveal the first significant difference.
-- [ ] `ID_CURDIFF`: reveal the current difference; replace the toolbar's count-only surrogate with the real command.
+- [x] `ID_CURDIFF`: reveal the selected/current difference; toolbar count surrogate removed.
 - [x] `ID_LASTDIFF`: select and reveal the last significant difference.
-- [ ] Match WinMerge toolbar order exactly: Next, Previous, conflicts, First, Current, Last.
-- [ ] Match WinMerge navigation behavior when no difference is selected by using current row/cursor position.
+- [x] Match WinMerge toolbar order exactly: Next, Previous, conflicts, First, Current, Last.
+- [x] Match WinMerge navigation behavior when no difference is selected by using current row/cursor position.
 - [ ] Match WinMerge navigation behavior when selected difference is offscreen.
-- [ ] Disable each navigation command from its own update rule, not one shared `hasDifferences` approximation.
+- [x] Disable each implemented navigation command from its own row-relative update rule.
 
 ### Merge commands
 
@@ -132,9 +278,9 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [x] `ID_R2LNEXT`: copy selected/current difference right to left and advance; clear selection after final difference.
 - [x] `ID_ALL_RIGHT`: copy all significant differences to the right after confirmation.
 - [x] `ID_ALL_LEFT`: copy all significant differences to the left after confirmation.
-- [ ] Render `ID_ALL_RIGHT` and `ID_ALL_LEFT` as separate direct toolbar buttons instead of one hidden menu.
+- [x] Render `ID_ALL_RIGHT` and `ID_ALL_LEFT` as separate direct toolbar buttons.
 - [ ] `ID_AUTO_MERGE`: implement WinMerge-compatible automatic merge and editable-state rules.
-- [ ] Support current-line merge when no explicit difference selection exists.
+- [x] Support current-line merge when no explicit difference selection exists.
 - [ ] Support merge commands over a selection containing multiple differences.
 - [ ] Implement read-only destination state and disable directional merge commands correctly.
 
@@ -144,14 +290,14 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] `ID_PREVFILE`: open the previous file pair from directory comparison results.
 - [ ] `ID_NEXTFILE`: open the next file pair from directory comparison results.
 - [ ] `ID_LASTFILE`: open the last file pair from directory comparison results.
-- [ ] `ID_OPTIONS`: open native comparison settings from toolbar and menu bar.
-- [-] `ID_REFRESH`: recomparison/repaint exists through Reload; separate WinMerge Refresh (`F5`) from Reload/Rescan (`Ctrl+F5`) semantics.
+- [-] `ID_OPTIONS`: native comparison settings open from toolbar/menu and drive real recomparison; filters/substitutions and persistence pending.
+- [x] `ID_REFRESH`: recompare current in-memory buffers without disk I/O; disk Reload remains a separate guarded command.
 - [x] Preserve left/right side identity when reloading a mixed scratchpad/file comparison.
 
 ### Toolbar interaction and presentation
 
-- [ ] Replace Open and Merge All menus with WinMerge-style direct commands plus explicit secondary-action affordances.
-- [ ] Keep exact toolbar command grouping and separator order from `Merge2.rc`.
+- [x] Implement New/Open/Save split controls and direct merge commands with explicit secondary-action affordances.
+- [x] Keep exact toolbar command grouping and separator order from `Merge2.rc`; unavailable context commands remain visible and accurately disabled.
 - [ ] Add native toolbar overflow behavior at narrow window widths without dropping commands silently.
 - [ ] Add toolbar customization while retaining a Reset to WinMerge Defaults action.
 - [ ] Persist toolbar visibility, size, and customization.
@@ -191,7 +337,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] Copy With Line Numbers.
 - [ ] Toggle, Next, Previous, and Clear All Bookmarks.
 - [ ] Go to Line and Go to Definition.
-- [ ] Options with native `Command-,` integration.
+- [x] Options with native `Command-,` integration.
 
 ### View menu
 
@@ -202,7 +348,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] Swap panes and vertical/horizontal split behavior.
 - [ ] Toolbar visibility, size, overflow, and customization.
 - [ ] Status, detail, location, output, and display-filter panes.
-- [ ] Refresh with `F5` semantics.
+- [x] Refresh with `F5` semantics.
 
 ### Merge menu
 
@@ -231,7 +377,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] Test Next/Previous Difference with `F8`/`F7` and platform-safe equivalents for WinMerge Alt-arrow shortcuts.
 - [ ] Test First/Current/Last Difference equivalents for Alt-Home/Enter/End.
 - [ ] Test directional copy and copy-and-advance without stealing standard word/paragraph navigation from selectable text.
-- [ ] Test Select Line Difference `F4`, Refresh `F5`, Rescan `Command-F5`, Change Pane `F6`, and Merge Mode `F9`.
+- [-] Select Line Difference `F4`, Refresh `F5`, and guarded Reload `Command-F5` verified in the packaged app; Change Pane `F6` and Merge Mode `F9` remain missing.
 - [ ] Test every shortcut in empty, disabled, loading, selected, dirty, and text-focused states.
 
 ## Diff Core Provenance and Parity Audit

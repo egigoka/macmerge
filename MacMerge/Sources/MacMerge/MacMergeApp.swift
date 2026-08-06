@@ -11,16 +11,89 @@ struct MacMergeApp: App {
 
     var body: some Scene {
         Window("MacMerge", id: "comparison") {
-            ComparisonView(model: applicationDelegate.model)
+            ComparisonView(
+                model: applicationDelegate.model,
+                requestNew: applicationDelegate.requestNewComparison,
+                openComparison: applicationDelegate.openComparison
+            )
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 720)
+        .commands {
+            WinMergeCommands(applicationDelegate: applicationDelegate)
+        }
+
+        Settings {
+            ComparisonSettingsView(model: applicationDelegate.model)
+        }
     }
 }
 
 @MainActor
 private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     let model = ComparisonModel()
+
+    func openComparison() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Files to Compare"
+        panel.message = "Select one or two files."
+        panel.prompt = "Compare"
+        panel.allowedContentTypes = [.plainText, .sourceCode, .data]
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        model.enqueueOpen(Array(panel.urls.prefix(2)))
+    }
+
+    func requestNewComparison() {
+        guard model.hasUnsavedChanges else {
+            model.createEmptyComparison()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Save changes before creating a new comparison?"
+        alert.informativeText = "Unsaved changes will be lost if you create a new comparison without saving."
+        alert.addButton(withTitle: "Save Changes")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Discard Changes")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            model.saveAllChanges { [weak model] saved in
+                if saved { model?.createEmptyComparison() }
+            }
+        case .alertThirdButtonReturn:
+            model.createEmptyComparison()
+        default:
+            break
+        }
+    }
+
+    func requestReloadComparison() {
+        guard model.canReloadFromDisk else { return }
+        guard model.hasReloadableUnsavedChanges else {
+            model.reloadFromDisk()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Save changes before reloading from disk?"
+        alert.informativeText = "Reload replaces edited file contents with their current versions on disk."
+        alert.addButton(withTitle: "Save and Reload")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Discard and Reload")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            model.saveReloadableChanges { [weak model] saved in
+                if saved { model?.reloadFromDisk() }
+            }
+        case .alertThirdButtonReturn:
+            model.discardChangesAndReloadFromDisk()
+        default:
+            break
+        }
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         application.activate()
@@ -111,6 +184,148 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private struct WinMergeCommands: Commands {
+    let applicationDelegate: ApplicationDelegate
+
+    private var model: ComparisonModel { applicationDelegate.model }
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Text Comparison", action: applicationDelegate.requestNewComparison)
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(!model.canCreateEmptyComparison)
+            Button("Open...", action: applicationDelegate.openComparison)
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(model.isWorking)
+        }
+        CommandGroup(replacing: .saveItem) {
+            Button("Save") {
+                model.saveAllChanges { _ in }
+            }
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(!model.hasUnsavedChanges || model.isWorking)
+            Divider()
+            Button("Save Left", action: { model.save(.left) })
+                .disabled(!model.left.isDirty || model.isWorking)
+            Button("Save Right", action: { model.save(.right) })
+                .disabled(!model.right.isDirty || model.isWorking)
+            Divider()
+            Button("Reload from Disk", action: applicationDelegate.requestReloadComparison)
+                .keyboardShortcut(KeyEquivalent("\u{F708}"), modifiers: .command)
+                .disabled(!model.canReloadFromDisk)
+        }
+        CommandGroup(after: .undoRedo) {
+            Button("Select Line Difference", action: model.selectLineDifference)
+                .keyboardShortcut(KeyEquivalent("\u{F707}"), modifiers: [])
+                .disabled(!model.canSelectLineDifference)
+        }
+        CommandMenu("Merge") {
+            Button("Next Difference", action: model.selectNextDifference)
+                .keyboardShortcut(KeyEquivalent("\u{F70B}"), modifiers: [])
+                .disabled(!model.canSelectNextDifference)
+            Button("Previous Difference", action: model.selectPreviousDifference)
+                .keyboardShortcut(KeyEquivalent("\u{F70A}"), modifiers: [])
+                .disabled(!model.canSelectPreviousDifference)
+            Button("First Difference", action: model.selectFirstDifference)
+                .disabled(!model.canNavigateDifferences)
+            Button("Current Difference", action: model.selectCurrentDifference)
+                .disabled(!model.canSelectCurrentDifference)
+            Button("Last Difference", action: model.selectLastDifference)
+                .disabled(!model.canNavigateDifferences)
+            Divider()
+            Button("Copy to Right") {
+                model.mergeSelectedDifference(direction: .leftToRight, advance: false)
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(!model.canMergeCurrentDifference)
+            Button("Copy to Left") {
+                model.mergeSelectedDifference(direction: .rightToLeft, advance: false)
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(!model.canMergeCurrentDifference)
+            Button("Copy to Right and Advance") {
+                model.mergeSelectedDifference(direction: .leftToRight, advance: true)
+            }
+            .disabled(!model.canMergeCurrentDifference)
+            Button("Copy to Left and Advance") {
+                model.mergeSelectedDifference(direction: .rightToLeft, advance: true)
+            }
+            .disabled(!model.canMergeCurrentDifference)
+            Divider()
+            Button("Copy All to Right") {
+                model.mergeAll(direction: .leftToRight)
+            }
+            .disabled(!model.canNavigateDifferences)
+            Button("Copy All to Left") {
+                model.mergeAll(direction: .rightToLeft)
+            }
+            .disabled(!model.canNavigateDifferences)
+        }
+        CommandGroup(after: .toolbar) {
+            Button("Refresh", action: model.refresh)
+                .keyboardShortcut(KeyEquivalent("\u{F708}"), modifiers: [])
+                .disabled(!model.canRefresh)
+        }
+        CommandMenu("Tools") {
+            Button("Filters...") {}
+                .disabled(true)
+            Button("Generate Patch...") {}
+                .disabled(true)
+            Divider()
+            SettingsLink {
+                Text("Options...")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+        CommandMenu("Plugins") {
+            Button("No plugins installed") {}
+                .disabled(true)
+        }
+    }
+}
+
+private struct ComparisonSettingsView: View {
+    let model: ComparisonModel
+
+    var body: some View {
+        Form {
+            Picker("Algorithm", selection: optionBinding(\.algorithm)) {
+                Text("Default").tag(DiffAlgorithm.default)
+                Text("Minimal").tag(DiffAlgorithm.minimal)
+                Text("Patience").tag(DiffAlgorithm.patience)
+                Text("Histogram").tag(DiffAlgorithm.histogram)
+                Text("None").tag(DiffAlgorithm.none)
+            }
+            Picker("Whitespace", selection: optionBinding(\.whitespace)) {
+                Text("Compare all").tag(WhitespaceComparison.compareAll)
+                Text("Ignore changes").tag(WhitespaceComparison.ignoreChanges)
+                Text("Ignore all").tag(WhitespaceComparison.ignoreAll)
+            }
+            Toggle("Ignore case", isOn: optionBinding(\.ignoreCase))
+            Toggle("Ignore numbers", isOn: optionBinding(\.ignoreNumbers))
+            Toggle("Ignore blank lines", isOn: optionBinding(\.ignoreBlankLines))
+            Toggle("Ignore line ending style", isOn: optionBinding(\.ignoreLineEndings))
+            Toggle("Indent heuristic", isOn: optionBinding(\.indentHeuristic))
+        }
+        .formStyle(.grouped)
+        .padding(20)
+        .frame(width: 430, height: 390)
+    }
+
+    private func optionBinding<Value>(
+        _ keyPath: WritableKeyPath<LineDiffOptions, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { model.options[keyPath: keyPath] },
+            set: { value in
+                var options = model.options
+                options[keyPath: keyPath] = value
+                model.setOptions(options)
+            }
+        )
+    }
+}
+
 enum ComparisonSide: Equatable, Hashable, Sendable {
     case left
     case right
@@ -186,14 +401,18 @@ struct DifferenceLocation: Sendable {
 }
 
 private actor ComparisonWorker {
-    func compare(left: String, right: String) throws -> ComparisonRenderResult {
+    func compare(left: String, right: String, options: LineDiffOptions) throws -> ComparisonRenderResult {
         try Task.checkCancellation()
-        return try computeComparison(left: left, right: right)
+        return try computeComparison(left: left, right: right, options: options)
     }
 }
 
-private func computeComparison(left: String, right: String) throws -> ComparisonRenderResult {
-    let rows = try LineDiff.compare(left: left, right: right)
+private func computeComparison(
+    left: String,
+    right: String,
+    options: LineDiffOptions = LineDiffOptions()
+) throws -> ComparisonRenderResult {
+    let rows = try LineDiff.compare(left: left, right: right, options: options)
     var maximumLineColumns = 0
     var differenceLocations: [DiffRow.ID: DifferenceLocation] = [:]
     var differenceIDs: [DiffRow.ID] = []
@@ -233,10 +452,34 @@ private func displayColumnCount(_ text: String) -> Int {
     return column
 }
 
+func intralineDifferenceRange(in text: String, comparedWith other: String) -> NSRange? {
+    var textStart = text.startIndex
+    var otherStart = other.startIndex
+    while textStart < text.endIndex,
+          otherStart < other.endIndex,
+          text[textStart] == other[otherStart] {
+        text.formIndex(after: &textStart)
+        other.formIndex(after: &otherStart)
+    }
+
+    var textEnd = text.endIndex
+    var otherEnd = other.endIndex
+    while textEnd > textStart, otherEnd > otherStart {
+        let previousText = text.index(before: textEnd)
+        let previousOther = other.index(before: otherEnd)
+        guard text[previousText] == other[previousOther] else { break }
+        textEnd = previousText
+        otherEnd = previousOther
+    }
+
+    guard textStart < textEnd else { return nil }
+    return NSRange(textStart ..< textEnd, in: text)
+}
+
 @Observable
 @MainActor
 final class ComparisonModel {
-    private struct ScratchpadEditKey: Hashable {
+    private struct LineEditKey: Hashable {
         let side: ComparisonSide
         let rowID: DiffRow.ID
     }
@@ -258,12 +501,17 @@ final class ComparisonModel {
     private(set) var differenceIDs: [DiffRow.ID] = []
     private(set) var summary = DiffSummary(rows: [])
     private(set) var selectedDifferenceID: DiffRow.ID?
+    private(set) var currentRowID: DiffRow.ID?
+    private(set) var selectedDifferenceRevealRevision = 0
+    private(set) var lineDifferenceSelectionRevision = 0
+    private(set) var activeSide = ComparisonSide.left
     private(set) var isWorking = false
     private(set) var comparisonFailed = false
     private(set) var isComparisonCurrent = true
     private(set) var pendingExternalOpenURLs: [URL]?
     private(set) var pendingEncodingSelection: PendingEncodingSelection?
     private(set) var hasPendingSaveWarning = false
+    private(set) var options = LineDiffOptions()
     var errorMessage: String?
 
     private var loadedInitialArguments = false
@@ -279,7 +527,7 @@ final class ComparisonModel {
     private let comparisonWorker = ComparisonWorker()
     private var pendingEncodingRetry: (@MainActor (TextFileEncoding) -> Void)?
     private var liveDiffTask: Task<Void, Never>?
-    private var scratchpadEditBaselines: [ScratchpadEditKey: String] = [:]
+    private var lineEditBaselines: [LineEditKey: String] = [:]
 
     var isReady: Bool {
         left.isLoaded && right.isLoaded
@@ -292,16 +540,31 @@ final class ComparisonModel {
     var hasDifferences: Bool { summary.differences > 0 && isComparisonCurrent }
     var hasUnsavedChanges: Bool { left.isDirty || right.isDirty }
     var hasSelectedDifference: Bool { selectedDifferenceID != nil && !isWorking }
+    var canMergeCurrentDifference: Bool { currentDifferenceID != nil && !isWorking }
     var canNavigateDifferences: Bool { hasDifferences && !isWorking }
     var canSelectPreviousDifference: Bool {
-        guard canNavigateDifferences, let selectedDifferencePosition else { return canNavigateDifferences }
-        return selectedDifferencePosition > 1
+        canNavigateDifferences && adjacentDifferenceID(offset: -1) != nil
     }
     var canSelectNextDifference: Bool {
-        guard canNavigateDifferences, let selectedDifferencePosition else { return canNavigateDifferences }
-        return selectedDifferencePosition < summary.differences
+        canNavigateDifferences && adjacentDifferenceID(offset: 1) != nil
     }
     var canReloadFromDisk: Bool { !isWorking && (left.url != nil || right.url != nil) }
+    var canRefresh: Bool { isReady && !isWorking }
+    var canSelectCurrentDifference: Bool {
+        currentDifferenceID != nil && !isWorking
+    }
+    var canSelectLineDifference: Bool {
+        guard !isWorking,
+              let id = currentDifferenceID,
+              let location = differenceLocations[id],
+              rows.indices.contains(location.rowIndex),
+              rows[location.rowIndex].kind == .modified,
+              let leftText = rows[location.rowIndex].left?.text,
+              let rightText = rows[location.rowIndex].right?.text else { return false }
+        let text = activeSide == .left ? leftText : rightText
+        let other = activeSide == .left ? rightText : leftText
+        return intralineDifferenceRange(in: text, comparedWith: other) != nil
+    }
     var hasReloadableUnsavedChanges: Bool {
         (left.document?.isDirty == true) || (right.document?.isDirty == true)
     }
@@ -336,15 +599,16 @@ final class ComparisonModel {
         differenceIDs = []
         summary = DiffSummary(rows: [])
         selectedDifferenceID = nil
+        currentRowID = nil
         comparisonFailed = false
         isComparisonCurrent = true
         errorMessage = nil
-        scratchpadEditBaselines.removeAll()
+        lineEditBaselines.removeAll()
         history.reset(to: snapshot)
     }
 
     func editText(_ text: String, on side: ComparisonSide) {
-        guard !isWorking, hasScratchpad else { return }
+        guard !isWorking, file(on: side).isLoaded else { return }
         switch side {
         case .left:
             left.text = text
@@ -357,12 +621,12 @@ final class ComparisonModel {
         scheduleLiveDiff()
     }
 
-    func editScratchpadLine(rowID: DiffRow.ID, on side: ComparisonSide, replacement: String) {
-        guard !isWorking, file(on: side).isUntitled else { return }
-        let editKey = ScratchpadEditKey(side: side, rowID: rowID)
-        let beginsEditSession = scratchpadEditBaselines[editKey] == nil
-        let baselineText = scratchpadEditBaselines[editKey] ?? file(on: side).text
-        scratchpadEditBaselines[editKey] = baselineText
+    func editLine(rowID: DiffRow.ID, on side: ComparisonSide, replacement: String) {
+        guard !isWorking, file(on: side).isLoaded else { return }
+        let editKey = LineEditKey(side: side, rowID: rowID)
+        let beginsEditSession = lineEditBaselines[editKey] == nil
+        let baselineText = lineEditBaselines[editKey] ?? file(on: side).text
+        lineEditBaselines[editKey] = baselineText
         let rowIndex: Int
         let row: DiffRow?
         if rowID.leftNumber == nil, rowID.rightNumber == nil {
@@ -400,9 +664,9 @@ final class ComparisonModel {
         }
     }
 
-    func finishScratchpadLineEditing(rowID: DiffRow.ID, on side: ComparisonSide) {
-        let removed = scratchpadEditBaselines.removeValue(
-            forKey: ScratchpadEditKey(side: side, rowID: rowID)
+    func finishLineEditing(rowID: DiffRow.ID, on side: ComparisonSide) {
+        let removed = lineEditBaselines.removeValue(
+            forKey: LineEditKey(side: side, rowID: rowID)
         )
         if removed != nil {
             history.discardRedundantUndo()
@@ -759,6 +1023,21 @@ final class ComparisonModel {
         }
         guard differenceLocations[id] != nil else { return }
         selectedDifferenceID = id
+        currentRowID = id
+    }
+
+    func activateRow(_ id: DiffRow.ID?) {
+        guard !isWorking, isComparisonCurrent else { return }
+        currentRowID = id
+        guard let id, differenceLocations[id] != nil else {
+            selectedDifferenceID = nil
+            return
+        }
+        selectedDifferenceID = id
+    }
+
+    func activateSide(_ side: ComparisonSide) {
+        activeSide = side
     }
 
     func selectPreviousDifference() {
@@ -772,15 +1051,44 @@ final class ComparisonModel {
     func selectFirstDifference() {
         guard !isWorking else { return }
         selectedDifferenceID = differenceIDs.first
+        currentRowID = selectedDifferenceID
+    }
+
+    func selectCurrentDifference() {
+        guard let currentDifferenceID else { return }
+        selectedDifferenceID = currentDifferenceID
+        currentRowID = currentDifferenceID
+        selectedDifferenceRevealRevision &+= 1
+    }
+
+    func selectLineDifference() {
+        guard canSelectLineDifference else { return }
+        selectCurrentDifference()
+        lineDifferenceSelectionRevision &+= 1
     }
 
     func selectLastDifference() {
         guard !isWorking else { return }
         selectedDifferenceID = differenceIDs.last
+        currentRowID = selectedDifferenceID
+    }
+
+    func refresh() {
+        commitActiveEditor()
+        guard canRefresh else { return }
+        scheduleDiff(selectingDifferenceAt: selectedDifferencePosition.map { $0 - 1 })
+    }
+
+    func setOptions(_ options: LineDiffOptions) {
+        guard self.options != options else { return }
+        self.options = options
+        if isReady {
+            scheduleDiff(selectingDifferenceAt: selectedDifferencePosition.map { $0 - 1 })
+        }
     }
 
     func mergeSelectedDifference(direction: MergeDirection, advance: Bool) {
-        guard let selectedDifferenceID else { return }
+        guard let selectedDifferenceID = currentDifferenceID else { return }
         merge(
             rowID: selectedDifferenceID,
             direction: direction,
@@ -890,6 +1198,13 @@ final class ComparisonModel {
         }
     }
 
+    func saveReloadableChanges(completion: @escaping @MainActor (Bool) -> Void) {
+        let sides = [ComparisonSide.left, .right].filter {
+            file(on: $0).document?.isDirty == true
+        }
+        saveReloadableChanges(sides[...], completion: completion)
+    }
+
     func loadInitialArguments() {
         guard !loadedInitialArguments else { return }
         loadedInitialArguments = true
@@ -918,10 +1233,15 @@ final class ComparisonModel {
         }
 
         let source = snapshot
+        let comparisonOptions = options
         beginOperation()
         Task {
             do {
-                let comparison = try await comparisonWorker.compare(left: source.left, right: source.right)
+                let comparison = try await comparisonWorker.compare(
+                    left: source.left,
+                    right: source.right,
+                    options: comparisonOptions
+                )
                 if generation == diffGeneration, source == snapshot {
                     rows = comparison.rows
                     maximumLineColumns = comparison.maximumLineColumns
@@ -932,6 +1252,7 @@ final class ComparisonModel {
                     isComparisonCurrent = true
                     if let index, !differenceIDs.isEmpty {
                         selectedDifferenceID = differenceIDs[min(index, differenceIDs.count - 1)]
+                        currentRowID = selectedDifferenceID
                     } else if selectedDifferenceID.map({ differenceLocations[$0] == nil }) == true {
                         selectedDifferenceID = nil
                     }
@@ -963,10 +1284,15 @@ final class ComparisonModel {
         diffGeneration += 1
         let generation = diffGeneration
         let source = snapshot
+        let comparisonOptions = options
         liveDiffTask = Task {
             do {
                 try await Task.sleep(for: .milliseconds(120))
-                let comparison = try await comparisonWorker.compare(left: source.left, right: source.right)
+                let comparison = try await comparisonWorker.compare(
+                    left: source.left,
+                    right: source.right,
+                    options: comparisonOptions
+                )
                 guard !Task.isCancelled, generation == diffGeneration, source == snapshot else { return }
                 rows = comparison.rows
                 maximumLineColumns = comparison.maximumLineColumns
@@ -1006,21 +1332,41 @@ final class ComparisonModel {
 
     private func selectAdjacentDifference(offset: Int) {
         guard !isWorking else { return }
-        let ids = differenceIDs
-        guard !ids.isEmpty else {
+        guard !differenceIDs.isEmpty else {
             selectedDifferenceID = nil
             return
         }
+        guard let nextID = adjacentDifferenceID(offset: offset) else { return }
+        selectedDifferenceID = nextID
+        currentRowID = nextID
+    }
 
-        guard let selectedDifferenceID,
-              let index = differenceLocations[selectedDifferenceID]?.position else {
-            self.selectedDifferenceID = offset > 0 ? ids[0] : ids[ids.count - 1]
-            return
+    private func adjacentDifferenceID(offset: Int) -> DiffRow.ID? {
+        guard !differenceIDs.isEmpty else { return nil }
+        guard let originID = selectedDifferenceID ?? currentRowID else {
+            return offset > 0 ? differenceIDs.first : differenceIDs.last
         }
+        if let position = differenceLocations[originID]?.position {
+            let nextPosition = position + offset
+            return differenceIDs.indices.contains(nextPosition) ? differenceIDs[nextPosition] : nil
+        }
+        guard let rowIndex = rows.firstIndex(where: { $0.id == originID }) else { return nil }
+        if offset > 0 {
+            return differenceIDs.first(where: {
+                (differenceLocations[$0]?.rowIndex ?? -1) > rowIndex
+            })
+        }
+        return differenceIDs.last(where: {
+            (differenceLocations[$0]?.rowIndex ?? .max) < rowIndex
+        })
+    }
 
-        let nextIndex = index + offset
-        guard ids.indices.contains(nextIndex) else { return }
-        self.selectedDifferenceID = ids[nextIndex]
+    private var currentDifferenceID: DiffRow.ID? {
+        if let selectedDifferenceID, differenceLocations[selectedDifferenceID] != nil {
+            return selectedDifferenceID
+        }
+        guard let currentRowID, differenceLocations[currentRowID] != nil else { return nil }
+        return currentRowID
     }
 
     private func performSave(_ side: ComparisonSide, scratchpadDestination: URL? = nil) async -> Bool {
@@ -1077,6 +1423,23 @@ final class ComparisonModel {
 
     private func file(on side: ComparisonSide) -> ComparedFile {
         side == .left ? left : right
+    }
+
+    private func saveReloadableChanges(
+        _ sides: ArraySlice<ComparisonSide>,
+        completion: @escaping @MainActor (Bool) -> Void
+    ) {
+        guard let side = sides.first else {
+            completion(true)
+            return
+        }
+        save(side) { [weak self] saved in
+            guard let self, saved else {
+                completion(false)
+                return
+            }
+            self.saveReloadableChanges(sides.dropFirst(), completion: completion)
+        }
     }
 
     private func setFile(_ file: ComparedFile, on side: ComparisonSide) {
@@ -1222,13 +1585,13 @@ final class ComparisonModel {
 
 private struct ComparisonView: View {
     let model: ComparisonModel
+    let requestNew: () -> Void
+    let openComparison: () -> Void
     @State private var importingSide: ComparisonSide?
     @State private var presentsImporter = false
     @State private var replacementSide: ComparisonSide?
     @State private var pendingImportedURL: URL?
     @State private var mergeAllDirection: MergeDirection?
-    @State private var confirmsDiscardAndReload = false
-    @State private var confirmsNewComparison = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1253,11 +1616,11 @@ private struct ComparisonView: View {
 
             ComparisonToolbar(
                 model: model,
-                requestNew: requestNewComparison,
+                requestNew: requestNew,
+                openComparison: openComparison,
                 openLeft: { openImporter(for: .left) },
                 openRight: { openImporter(for: .right) },
-                requestMergeAll: { mergeAllDirection = $0 },
-                requestReload: requestReload
+                requestMergeAll: { mergeAllDirection = $0 }
             )
             Divider()
 
@@ -1275,23 +1638,44 @@ private struct ComparisonView: View {
                         maximumLineColumns: model.maximumLineColumns,
                         differenceLocations: model.differenceLocations,
                         selectedDifferenceID: model.selectedDifferenceID,
-                        leftEditable: model.left.isUntitled,
-                        rightEditable: model.right.isUntitled,
-                        selectDifference: model.selectDifference,
-                        editLeft: { model.editScratchpadLine(rowID: $0, on: .left, replacement: $1) },
-                        editRight: { model.editScratchpadLine(rowID: $0, on: .right, replacement: $1) },
-                        finishEditingLeft: { model.finishScratchpadLineEditing(rowID: $0, on: .left) },
-                        finishEditingRight: { model.finishScratchpadLineEditing(rowID: $0, on: .right) }
+                        selectedDifferenceRevealRevision: model.selectedDifferenceRevealRevision,
+                        lineDifferenceSelectionRevision: model.lineDifferenceSelectionRevision,
+                        activeSide: model.activeSide,
+                        leftEditable: model.left.isLoaded,
+                        rightEditable: model.right.isLoaded,
+                        selectDifference: model.activateRow,
+                        activateSide: model.activateSide,
+                        editLeft: { model.editLine(rowID: $0, on: .left, replacement: $1) },
+                        editRight: { model.editLine(rowID: $0, on: .right, replacement: $1) },
+                        finishEditingLeft: { model.finishLineEditing(rowID: $0, on: .left) },
+                        finishEditingRight: { model.finishLineEditing(rowID: $0, on: .right) },
+                        contextMenuActions: DiffContextMenuActions(
+                            activate: { rowID, side in
+                                model.activateRow(rowID)
+                                model.activateSide(side)
+                            },
+                            canMerge: { model.canMergeCurrentDifference },
+                            merge: { rowID, direction in
+                                model.merge(rowID: rowID, direction: direction)
+                            },
+                            canSelectLineDifference: { model.canSelectLineDifference },
+                            selectLineDifference: model.selectLineDifference,
+                            canUndo: { model.canUndo },
+                            undo: model.undo,
+                            canRedo: { model.canRedo },
+                            redo: model.redo,
+                            fileURL: { side in
+                                side == .left ? model.left.url : model.right.url
+                            }
+                        )
                     )
                 }
             } else {
-                EmptyComparisonView(
-                    hasLeftFile: model.left.isLoaded,
-                    hasRightFile: model.right.isLoaded,
-                    openLeft: { openImporter(for: .left) },
-                    openRight: { openImporter(for: .right) }
-                )
+                EmptyComparisonView()
             }
+
+            Divider()
+            ComparisonStatusBar(model: model)
         }
         .frame(minWidth: 900, minHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -1415,35 +1799,6 @@ private struct ComparisonView: View {
             Text("\(model.pendingEncodingSelection?.url.lastPathComponent ?? "File") matches multiple encodings. Choose how to decode it.")
         }
         .confirmationDialog(
-            "Create a new empty comparison?",
-            isPresented: $confirmsNewComparison
-        ) {
-            Button("Save Changes and Create New") {
-                model.saveAllChanges { saved in
-                    if saved {
-                        model.createEmptyComparison()
-                    }
-                }
-            }
-            Button("Discard Changes and Create New", role: .destructive) {
-                model.createEmptyComparison()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Unsaved changes in the current comparison will be lost.")
-        }
-        .confirmationDialog(
-            "Discard changes and reload?",
-            isPresented: $confirmsDiscardAndReload
-        ) {
-            Button("Discard Changes and Reload", role: .destructive) {
-                model.discardChangesAndReloadFromDisk()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Document-backed files will be reloaded from disk. Unsaved changes to those files will be lost; untitled panes remain unchanged.")
-        }
-        .confirmationDialog(
             mergeAllTitle,
             isPresented: Binding(
                 get: { mergeAllDirection != nil },
@@ -1505,21 +1860,6 @@ private struct ComparisonView: View {
         }
     }
 
-    private func requestNewComparison() {
-        if model.hasUnsavedChanges {
-            confirmsNewComparison = true
-        } else {
-            model.createEmptyComparison()
-        }
-    }
-
-    private func requestReload() {
-        if model.hasReloadableUnsavedChanges {
-            confirmsDiscardAndReload = true
-        } else {
-            model.reloadFromDisk()
-        }
-    }
 }
 
 private struct ComparisonHeader: View {
@@ -1698,56 +2038,101 @@ private struct DifferenceCounter: View {
 private struct ComparisonToolbar: View {
     let model: ComparisonModel
     let requestNew: () -> Void
+    let openComparison: () -> Void
     let openLeft: () -> Void
     let openRight: () -> Void
     let requestMergeAll: (MergeDirection) -> Void
-    let requestReload: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button("New empty comparison", systemImage: "doc.badge.plus", action: requestNew)
-                .disabled(!model.canCreateEmptyComparison)
-                .help("Create an empty two-file comparison")
+        HStack(spacing: 7) {
+            Menu("New comparison", systemImage: "doc.badge.plus") {
+                Button("Text", action: requestNew)
+                Divider()
+                Button("Table") {}.disabled(true)
+                Button("Binary") {}.disabled(true)
+                Button("Image") {}.disabled(true)
+                Button("Webpage") {}.disabled(true)
+                Button("Folder") {}.disabled(true)
+                Divider()
+                Menu("New (3 panes)") {
+                    Button("Text") {}.disabled(true)
+                    Button("Table") {}.disabled(true)
+                    Button("Binary") {}.disabled(true)
+                    Button("Image") {}.disabled(true)
+                    Button("Webpage") {}.disabled(true)
+                    Button("Folder") {}.disabled(true)
+                }
+            } primaryAction: {
+                requestNew()
+            }
+            .disabled(!model.canCreateEmptyComparison)
+            .help("Create a new text comparison (Command-N)")
 
             Menu("Open files", systemImage: "folder") {
+                Button("Open Comparison...", systemImage: "folder", action: openComparison)
+                Divider()
                 Button("Open Left...", systemImage: "rectangle.split.2x1", action: openLeft)
                 Button("Open Right...", systemImage: "rectangle.split.2x1", action: openRight)
+            } primaryAction: {
+                openComparison()
             }
             .disabled(model.isWorking)
-            .help("Open or replace a comparison file")
+            .help("Select files to compare (Command-O)")
 
-            Button("Save changed files", systemImage: "square.and.arrow.down") {
+            Menu("Save", systemImage: "square.and.arrow.down") {
+                Button("Save Left", action: { model.save(.left) })
+                    .disabled(!model.left.isDirty)
+                Button("Save Right", action: { model.save(.right) })
+                    .disabled(!model.right.isDirty)
+            } primaryAction: {
                 model.saveAllChanges { _ in }
             }
-                .disabled(!model.hasUnsavedChanges || model.isWorking)
-                .help("Save all changed files")
+            .disabled(!model.hasUnsavedChanges || model.isWorking)
+            .help("Save changed files (Command-S)")
 
             toolbarDivider
 
             Button("Undo", systemImage: "arrow.uturn.backward", action: model.undo)
                 .disabled(!model.canUndo)
-                .help("Undo merge")
+                .help("Undo the last edit or merge")
             Button("Redo", systemImage: "arrow.uturn.forward", action: model.redo)
                 .disabled(!model.canRedo)
-                .help("Redo merge")
+                .help("Redo the last edit or merge")
+
+            toolbarDivider
+
+            Button("Select line difference", systemImage: "character.cursor.ibeam") {
+                model.selectLineDifference()
+            }
+            .disabled(!model.canSelectLineDifference)
+            .help("Select the intra-line difference in the active pane (F4)")
+
+            toolbarDivider
+
+            Button("Next difference", systemImage: "arrow.down", action: model.selectNextDifference)
+                .disabled(!model.canSelectNextDifference)
+                .help("Go to next difference (F8)")
+            Button("Previous difference", systemImage: "arrow.up", action: model.selectPreviousDifference)
+                .disabled(!model.canSelectPreviousDifference)
+                .help("Go to previous difference (F7)")
+
+            toolbarDivider
+
+            Button("Next conflict", systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90") {}
+                .disabled(true)
+                .help("Next conflict is available in three-pane conflict comparisons")
+            Button("Previous conflict", systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90") {}
+                .disabled(true)
+                .help("Previous conflict is available in three-pane conflict comparisons")
 
             toolbarDivider
 
             Button("First difference", systemImage: "arrow.up.to.line", action: model.selectFirstDifference)
                 .disabled(!model.canNavigateDifferences)
                 .help("Go to first difference")
-            Button("Previous difference", systemImage: "arrow.up", action: model.selectPreviousDifference)
-                .disabled(!model.canSelectPreviousDifference)
-                .help("Go to previous difference")
-            Text(selectionLabel)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 68)
-                .accessibilityLabel(selectionAccessibilityLabel)
-                .accessibilityAddTraits(.updatesFrequently)
-            Button("Next difference", systemImage: "arrow.down", action: model.selectNextDifference)
-                .disabled(!model.canSelectNextDifference)
-                .help("Go to next difference")
+            Button("Current difference", systemImage: "scope", action: model.selectCurrentDifference)
+                .disabled(!model.canSelectCurrentDifference)
+                .help("Reveal the current difference")
             Button("Last difference", systemImage: "arrow.down.to.line", action: model.selectLastDifference)
                 .disabled(!model.canNavigateDifferences)
                 .help("Go to last difference")
@@ -1757,53 +2142,82 @@ private struct ComparisonToolbar: View {
             Button("Copy selected difference to right", systemImage: "arrow.right") {
                 model.mergeSelectedDifference(direction: .leftToRight, advance: false)
             }
-                .disabled(!model.hasSelectedDifference)
-                .help("Copy selected difference to right")
+                .disabled(!model.canMergeCurrentDifference)
+                .help("Copy the selected or current difference to right")
             Button("Copy selected difference to left", systemImage: "arrow.left") {
                 model.mergeSelectedDifference(direction: .rightToLeft, advance: false)
             }
-                .disabled(!model.hasSelectedDifference)
-                .help("Copy selected difference to left")
+                .disabled(!model.canMergeCurrentDifference)
+                .help("Copy the selected or current difference to left")
 
             Button(
                 "Copy selected difference to right and advance",
                 systemImage: "arrow.right.circle",
                 action: { model.mergeSelectedDifference(direction: .leftToRight, advance: true) }
             )
-            .disabled(!model.hasSelectedDifference)
+            .disabled(!model.canMergeCurrentDifference)
             .help("Copy selected difference to right and advance")
             Button(
                 "Copy selected difference to left and advance",
                 systemImage: "arrow.left.circle",
                 action: { model.mergeSelectedDifference(direction: .rightToLeft, advance: true) }
             )
-            .disabled(!model.hasSelectedDifference)
+            .disabled(!model.canMergeCurrentDifference)
             .help("Copy selected difference to left and advance")
 
             toolbarDivider
 
-            Menu("Merge all", systemImage: "arrow.left.arrow.right") {
-                Button("Copy All to Right", systemImage: "arrow.right.square") {
-                    requestMergeAll(.leftToRight)
-                }
-                Button("Copy All to Left", systemImage: "arrow.left.square") {
-                    requestMergeAll(.rightToLeft)
-                }
+            Button("Copy all differences to right", systemImage: "arrow.right.to.line") {
+                requestMergeAll(.leftToRight)
             }
             .disabled(!model.canNavigateDifferences)
-            .help("Copy all differences")
+            .help("Copy all differences to right")
+            Button("Copy all differences to left", systemImage: "arrow.left.to.line") {
+                requestMergeAll(.rightToLeft)
+            }
+            .disabled(!model.canNavigateDifferences)
+            .help("Copy all differences to left")
 
             toolbarDivider
 
-            Button("Reload files", systemImage: "arrow.clockwise", action: requestReload)
-                .disabled(!model.canReloadFromDisk)
-                .help(model.hasUnsavedChanges ? "Discard changes and reload both files" : "Reload both files from disk")
+            Button("Auto merge", systemImage: "wand.and.stars") {}
+                .disabled(true)
+                .help("Auto Merge is available in clean three-pane comparisons")
+
+            toolbarDivider
+
+            Button("First compared file", systemImage: "backward.end") {}
+                .disabled(true)
+                .help("Compared-file navigation is available from folder comparisons")
+            Button("Previous compared file", systemImage: "backward") {}
+                .disabled(true)
+                .help("Compared-file navigation is available from folder comparisons")
+            Button("Next compared file", systemImage: "forward") {}
+                .disabled(true)
+                .help("Compared-file navigation is available from folder comparisons")
+            Button("Last compared file", systemImage: "forward.end") {}
+                .disabled(true)
+                .help("Compared-file navigation is available from folder comparisons")
+
+            toolbarDivider
+
+            SettingsLink {
+                Label("Options", systemImage: "gearshape")
+            }
+            .help("Open comparison options (Command-,)")
+
+            toolbarDivider
+
+            Button("Refresh", systemImage: "arrow.clockwise", action: model.refresh)
+                .disabled(!model.canRefresh)
+                .help("Recompare the current in-memory text without reloading files")
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
         .controlSize(.small)
-        .padding(.horizontal, 18)
-        .frame(height: 40)
+        .padding(.horizontal, 8)
+        .frame(height: 34)
+        .background(Color(nsColor: .controlBackgroundColor))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Comparison commands")
     }
@@ -1812,47 +2226,57 @@ private struct ComparisonToolbar: View {
         Divider().frame(height: 18)
     }
 
-    private var selectionLabel: String {
-        guard let selectedPosition = model.selectedDifferencePosition else {
-            return "- / \(model.summary.differences)"
-        }
-        return "\(selectedPosition) / \(model.summary.differences)"
-    }
-
-    private var selectionAccessibilityLabel: String {
-        guard let selectedPosition = model.selectedDifferencePosition else {
-            return "No difference selected, \(model.summary.differences) total"
-        }
-        return "Difference \(selectedPosition) of \(model.summary.differences)"
-    }
 }
 
 private struct EmptyComparisonView: View {
-    let hasLeftFile: Bool
-    let hasRightFile: Bool
-    let openLeft: () -> Void
-    let openRight: () -> Void
+    var body: some View {
+        Color(nsColor: NSColor(calibratedWhite: 0.53, alpha: 1))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityLabel("No comparison open")
+    }
+}
+
+private struct ComparisonStatusBar: View {
+    let model: ComparisonModel
 
     var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "rectangle.split.2x1")
-                .font(.system(size: 42, weight: .ultraLight))
-                .foregroundStyle(.secondary)
-            VStack(spacing: 7) {
-                Text("Open two files to compare")
-                    .font(.title2.weight(.semibold))
-                Text("Line changes stay aligned across one continuous comparison surface.")
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 10) {
-                Button(hasLeftFile ? "Replace left" : "Open left", action: openLeft)
-                Button(hasRightFile ? "Replace right" : "Open right", action: openRight)
-                    .buttonStyle(.borderedProminent)
+        HStack(spacing: 8) {
+            Text(statusText)
+            Spacer()
+            if model.isReady {
+                Text("Differences: \(model.summary.differences)")
+                Divider().frame(height: 12)
+                Text("Left: \(model.left.displayName)")
+                Divider().frame(height: 12)
+                Text("Right: \(model.right.displayName)")
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
+
+    private var statusText: String {
+        if model.isWorking { return "Comparing..." }
+        if model.comparisonFailed { return "Comparison failed" }
+        if !model.isReady { return "Ready" }
+        return model.summary.differences == 0 ? "Files are identical" : "Comparison complete"
+    }
+}
+
+private struct DiffContextMenuActions {
+    let activate: (DiffRow.ID, ComparisonSide) -> Void
+    let canMerge: () -> Bool
+    let merge: (DiffRow.ID, MergeDirection) -> Void
+    let canSelectLineDifference: () -> Bool
+    let selectLineDifference: () -> Void
+    let canUndo: () -> Bool
+    let undo: () -> Void
+    let canRedo: () -> Bool
+    let redo: () -> Void
+    let fileURL: (ComparisonSide) -> URL?
 }
 
 private struct DiffCanvas: View {
@@ -1861,13 +2285,18 @@ private struct DiffCanvas: View {
     let maximumLineColumns: Int
     let differenceLocations: [DiffRow.ID: DifferenceLocation]
     let selectedDifferenceID: DiffRow.ID?
+    let selectedDifferenceRevealRevision: Int
+    let lineDifferenceSelectionRevision: Int
+    let activeSide: ComparisonSide
     let leftEditable: Bool
     let rightEditable: Bool
     let selectDifference: (DiffRow.ID?) -> Void
+    let activateSide: (ComparisonSide) -> Void
     let editLeft: (DiffRow.ID, String) -> Void
     let editRight: (DiffRow.ID, String) -> Void
     let finishEditingLeft: (DiffRow.ID) -> Void
     let finishEditingRight: (DiffRow.ID) -> Void
+    let contextMenuActions: DiffContextMenuActions
 
     var body: some View {
         DiffTableView(
@@ -1876,13 +2305,18 @@ private struct DiffCanvas: View {
             maximumLineColumns: maximumLineColumns,
             differenceLocations: differenceLocations,
             selectedDifferenceID: selectedDifferenceID,
+            selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
+            lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
+            activeSide: activeSide,
             leftEditable: leftEditable,
             rightEditable: rightEditable,
             selectDifference: selectDifference,
+            activateSide: activateSide,
             editLeft: editLeft,
             editRight: editRight,
             finishEditingLeft: finishEditingLeft,
-            finishEditingRight: finishEditingRight
+            finishEditingRight: finishEditingRight,
+            contextMenuActions: contextMenuActions
         )
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -1894,26 +2328,35 @@ private struct DiffTableView: NSViewRepresentable {
     let maximumLineColumns: Int
     let differenceLocations: [DiffRow.ID: DifferenceLocation]
     let selectedDifferenceID: DiffRow.ID?
+    let selectedDifferenceRevealRevision: Int
+    let lineDifferenceSelectionRevision: Int
+    let activeSide: ComparisonSide
     let leftEditable: Bool
     let rightEditable: Bool
     let selectDifference: (DiffRow.ID?) -> Void
+    let activateSide: (ComparisonSide) -> Void
     let editLeft: (DiffRow.ID, String) -> Void
     let editRight: (DiffRow.ID, String) -> Void
     let finishEditingLeft: (DiffRow.ID) -> Void
     let finishEditingRight: (DiffRow.ID) -> Void
+    let contextMenuActions: DiffContextMenuActions
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             rows: displayedRows,
             rowsRevision: rowsRevision,
             differenceLocations: differenceLocations,
+            selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
+            lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
             leftEditable: leftEditable,
             rightEditable: rightEditable,
             selectDifference: selectDifference,
+            activateSide: activateSide,
             editLeft: editLeft,
             editRight: editRight,
             finishEditingLeft: finishEditingLeft,
-            finishEditingRight: finishEditingRight
+            finishEditingRight: finishEditingRight,
+            contextMenuActions: contextMenuActions
         )
     }
 
@@ -1955,10 +2398,12 @@ private struct DiffTableView: NSViewRepresentable {
     func updateNSView(_ container: DiffTableContainerView, context: Context) {
         guard let tableView = context.coordinator.tableView else { return }
         context.coordinator.selectDifference = selectDifference
+        context.coordinator.activateSide = activateSide
         context.coordinator.editLeft = editLeft
         context.coordinator.editRight = editRight
         context.coordinator.finishEditingLeft = finishEditingLeft
         context.coordinator.finishEditingRight = finishEditingRight
+        context.coordinator.contextMenuActions = contextMenuActions
         context.coordinator.differenceLocations = differenceLocations
         let editabilityChanged = context.coordinator.leftEditable != leftEditable
             || context.coordinator.rightEditable != rightEditable
@@ -1977,13 +2422,33 @@ private struct DiffTableView: NSViewRepresentable {
         container.maximumTextWidth = CGFloat(maximumLineColumns) * 7.25 + 12
 
         let oldSelection = context.coordinator.selectedDifferenceID
+        let revealRequested = context.coordinator.selectedDifferenceRevealRevision
+            != selectedDifferenceRevealRevision
+        let lineSelectionRequested = context.coordinator.lineDifferenceSelectionRevision
+            != lineDifferenceSelectionRevision
         context.coordinator.selectedDifferenceID = selectedDifferenceID
+        context.coordinator.selectedDifferenceRevealRevision = selectedDifferenceRevealRevision
+        context.coordinator.lineDifferenceSelectionRevision = lineDifferenceSelectionRevision
         context.coordinator.synchronizeTableSelection()
         context.coordinator.refreshVisibleRows(for: [oldSelection, selectedDifferenceID].compactMap { $0 })
-        if oldSelection != selectedDifferenceID,
+        if oldSelection != selectedDifferenceID || revealRequested,
            let selectedDifferenceID,
            let location = context.coordinator.differenceLocations[selectedDifferenceID] {
             tableView.scrollRowToVisible(location.rowIndex)
+        }
+        if lineSelectionRequested,
+           let selectedDifferenceID,
+           let location = context.coordinator.differenceLocations[selectedDifferenceID] {
+            tableView.scrollRowToVisible(location.rowIndex)
+            DispatchQueue.main.async { [weak tableView] in
+                guard let tableView,
+                      let cell = tableView.view(
+                        atColumn: 0,
+                        row: location.rowIndex,
+                        makeIfNecessary: true
+                      ) as? DiffTableCellView else { return }
+                cell.selectDifferenceRange(on: activeSide)
+            }
         }
     }
 
@@ -2003,13 +2468,17 @@ private struct DiffTableView: NSViewRepresentable {
         var rowsRevision: Int
         var differenceLocations: [DiffRow.ID: DifferenceLocation]
         var selectedDifferenceID: DiffRow.ID?
+        var selectedDifferenceRevealRevision: Int
+        var lineDifferenceSelectionRevision: Int
         var leftEditable: Bool
         var rightEditable: Bool
         var selectDifference: (DiffRow.ID?) -> Void
+        var activateSide: (ComparisonSide) -> Void
         var editLeft: (DiffRow.ID, String) -> Void
         var editRight: (DiffRow.ID, String) -> Void
         var finishEditingLeft: (DiffRow.ID) -> Void
         var finishEditingRight: (DiffRow.ID) -> Void
+        var contextMenuActions: DiffContextMenuActions
         weak var tableView: NSTableView?
         weak var container: DiffTableContainerView?
         private var isSynchronizingSelection = false
@@ -2024,24 +2493,32 @@ private struct DiffTableView: NSViewRepresentable {
             rows: [DiffRow],
             rowsRevision: Int,
             differenceLocations: [DiffRow.ID: DifferenceLocation],
+            selectedDifferenceRevealRevision: Int,
+            lineDifferenceSelectionRevision: Int,
             leftEditable: Bool,
             rightEditable: Bool,
             selectDifference: @escaping (DiffRow.ID?) -> Void,
+            activateSide: @escaping (ComparisonSide) -> Void,
             editLeft: @escaping (DiffRow.ID, String) -> Void,
             editRight: @escaping (DiffRow.ID, String) -> Void,
             finishEditingLeft: @escaping (DiffRow.ID) -> Void,
-            finishEditingRight: @escaping (DiffRow.ID) -> Void
+            finishEditingRight: @escaping (DiffRow.ID) -> Void,
+            contextMenuActions: DiffContextMenuActions
         ) {
             self.rows = rows
             self.rowsRevision = rowsRevision
             self.differenceLocations = differenceLocations
+            self.selectedDifferenceRevealRevision = selectedDifferenceRevealRevision
+            self.lineDifferenceSelectionRevision = lineDifferenceSelectionRevision
             self.leftEditable = leftEditable
             self.rightEditable = rightEditable
             self.selectDifference = selectDifference
+            self.activateSide = activateSide
             self.editLeft = editLeft
             self.editRight = editRight
             self.finishEditingLeft = finishEditingLeft
             self.finishEditingRight = finishEditingRight
+            self.contextMenuActions = contextMenuActions
             super.init()
         }
 
@@ -2083,6 +2560,15 @@ private struct DiffTableView: NSViewRepresentable {
                 editRight: editRight,
                 finishEditingLeft: finishEditingLeft,
                 finishEditingRight: finishEditingRight,
+                contextMenuActions: contextMenuActions,
+                activateLeft: { [weak self] in
+                    self?.selectDifference(self?.rows[row].id)
+                    self?.activateSide(.left)
+                },
+                activateRight: { [weak self] in
+                    self?.selectDifference(self?.rows[row].id)
+                    self?.activateSide(.right)
+                },
                 continueEditingLeft: { [weak self] lineOffset in
                     self?.continueEditing(fromRow: row, side: .left, lineOffset: lineOffset)
                 },
@@ -2375,6 +2861,9 @@ private final class DiffTableCellView: NSTableCellView {
         editRight: @escaping (DiffRow.ID, String) -> Void,
         finishEditingLeft: @escaping (DiffRow.ID) -> Void,
         finishEditingRight: @escaping (DiffRow.ID) -> Void,
+        contextMenuActions: DiffContextMenuActions,
+        activateLeft: @escaping () -> Void,
+        activateRight: @escaping () -> Void,
         continueEditingLeft: @escaping (Int) -> Void,
         continueEditingRight: @escaping (Int) -> Void
     ) {
@@ -2383,9 +2872,12 @@ private final class DiffTableCellView: NSTableCellView {
         self.row = row
         leftNumber.stringValue = row.left.map { String($0.number) } ?? ""
         leftText.stringValue = row.left?.text ?? ""
+        leftText.setDifferenceRange(differenceRange(for: row, side: .left))
+        leftText.configureContextMenu(row: row, side: .left, actions: contextMenuActions)
         leftText.configureEditable(
             leftEditable,
             accessibilityLabel: editorAccessibilityLabel(for: row, side: .left),
+            activate: activateLeft,
             finish: { [rowID = row.id] in finishEditingLeft(rowID) },
             continueAfterNewline: continueEditingLeft
         ) { [rowID = row.id] replacement in
@@ -2393,9 +2885,12 @@ private final class DiffTableCellView: NSTableCellView {
         }
         rightNumber.stringValue = row.right.map { String($0.number) } ?? ""
         rightText.stringValue = row.right?.text ?? ""
+        rightText.setDifferenceRange(differenceRange(for: row, side: .right))
+        rightText.configureContextMenu(row: row, side: .right, actions: contextMenuActions)
         rightText.configureEditable(
             rightEditable,
             accessibilityLabel: editorAccessibilityLabel(for: row, side: .right),
+            activate: activateRight,
             finish: { [rowID = row.id] in finishEditingRight(rowID) },
             continueAfterNewline: continueEditingRight
         ) { [rowID = row.id] replacement in
@@ -2423,6 +2918,15 @@ private final class DiffTableCellView: NSTableCellView {
         }
     }
 
+    func selectDifferenceRange(on side: ComparisonSide) {
+        switch side {
+        case .left:
+            leftText.selectDifferenceRange()
+        case .right:
+            rightText.selectDifferenceRange()
+        }
+    }
+
     func setHorizontalLayout(offset: CGFloat, maximumTextWidth: CGFloat) {
         leftText.setHorizontalLayout(offset: offset, contentWidth: maximumTextWidth)
         rightText.setHorizontalLayout(offset: offset, contentWidth: maximumTextWidth)
@@ -2434,6 +2938,18 @@ private final class DiffTableCellView: NSTableCellView {
         case (.removed, .left): Self.removedTint
         case (.added, .right): Self.addedTint
         default: .clear
+        }
+    }
+
+    private func differenceRange(for row: DiffRow, side: ComparisonSide) -> NSRange? {
+        guard row.kind == .modified,
+              let left = row.left?.text,
+              let right = row.right?.text else { return nil }
+        switch side {
+        case .left:
+            return intralineDifferenceRange(in: left, comparedWith: right)
+        case .right:
+            return intralineDifferenceRange(in: right, comparedWith: left)
         }
     }
 
@@ -2539,10 +3055,34 @@ private final class LockedLineClipView: NSClipView {
 }
 
 @MainActor
-private final class DiffLineTextView: NSView, NSTextViewDelegate {
+private final class DiffContextTextView: NSTextView {
+    var contextMenuProvider: (() -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuProvider?() ?? super.menu(for: event)
+    }
+}
+
+@MainActor
+private final class DiffLineTextView: NSView, NSTextViewDelegate, NSMenuDelegate {
+    private enum ContextAction: Int {
+        case copyToOther
+        case copyFromOther
+        case copyLeftDifference
+        case copyRightDifference
+        case selectLineDifference
+        case undo
+        case redo
+        case cut
+        case copy
+        case paste
+        case openDefault
+        case revealInFinder
+    }
+
     private let scrollView = LockedLineScrollView()
     private let clipView = LockedLineClipView()
-    private let textView: NSTextView = {
+    private let textView: DiffContextTextView = {
         let layoutManager = NSLayoutManager()
         layoutManager.allowsNonContiguousLayout = true
         let container = NSTextContainer(
@@ -2554,7 +3094,7 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
         layoutManager.addTextContainer(container)
         let storage = NSTextStorage()
         storage.addLayoutManager(layoutManager)
-        let view = NSTextView(frame: .zero, textContainer: container)
+        let view = DiffContextTextView(frame: .zero, textContainer: container)
         view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         view.textColor = .labelColor
         view.isEditable = false
@@ -2573,9 +3113,15 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
     private var horizontalOffset: CGFloat = 0
     private var contentWidth: CGFloat = 0
     private var committedValue = ""
+    private var differenceRange: NSRange?
+    private var activateHandler: (() -> Void)?
     private var commitHandler: ((String) -> Void)?
     private var finishHandler: (() -> Void)?
     private var continueAfterNewlineHandler: ((Int) -> Void)?
+    private var contextMenuRow: DiffRow?
+    private var contextMenuSide: ComparisonSide?
+    private var contextMenuActions: DiffContextMenuActions?
+    private var contextMenuItemCount = 0
 
     var stringValue: String {
         get { textView.string }
@@ -2600,6 +3146,16 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
         scrollView.borderType = .noBorder
         scrollView.documentView = textView
         textView.delegate = self
+        let menu = NSMenu(title: "Text Comparison")
+        menu.autoenablesItems = false
+        menu.allowsContextMenuPlugIns = false
+        menu.delegate = self
+        textView.menu = menu
+        textView.contextMenuProvider = { [weak self, weak menu] in
+            guard let self, let menu else { return nil }
+            self.menuNeedsUpdate(menu)
+            return menu
+        }
         addSubview(scrollView)
     }
 
@@ -2625,6 +3181,7 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
     func configureEditable(
         _ editable: Bool,
         accessibilityLabel: String,
+        activate: @escaping () -> Void,
         finish: @escaping () -> Void,
         continueAfterNewline: @escaping (Int) -> Void,
         commit: @escaping (String) -> Void
@@ -2632,10 +3189,241 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
         textView.isEditable = editable
         textView.isSelectable = true
         clipView.allowsVerticalEditing = editable
+        activateHandler = activate
         commitHandler = editable ? commit : nil
         finishHandler = editable ? finish : nil
         continueAfterNewlineHandler = editable ? continueAfterNewline : nil
         textView.setAccessibilityLabel(accessibilityLabel)
+    }
+
+    func configureContextMenu(
+        row: DiffRow,
+        side: ComparisonSide,
+        actions: DiffContextMenuActions
+    ) {
+        contextMenuRow = row
+        contextMenuSide = side
+        contextMenuActions = actions
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let row = contextMenuRow,
+              let side = contextMenuSide,
+              let actions = contextMenuActions else { return }
+        actions.activate(row.id, side)
+        menu.removeAllItems()
+
+        let otherSideName = side == .left ? "Right" : "Left"
+        addItem(
+            to: menu,
+            title: "Copy to \(otherSideName)",
+            action: .copyToOther,
+            keyEquivalent: side == .left ? "\u{F703}" : "\u{F702}",
+            modifiers: [.option],
+            enabled: row.kind != .unchanged && actions.canMerge()
+        )
+        addItem(
+            to: menu,
+            title: "Copy from \(otherSideName)",
+            action: .copyFromOther,
+            keyEquivalent: side == .left ? "\u{F702}" : "\u{F703}",
+            modifiers: [.option, .shift],
+            enabled: row.kind != .unchanged && actions.canMerge()
+        )
+        menu.addItem(.separator())
+
+        addDisabledItem(to: menu, title: "Copy Selected Lines to \(otherSideName)")
+        addDisabledItem(to: menu, title: "Copy Selected Lines from \(otherSideName)")
+        menu.addItem(.separator())
+
+        addItem(
+            to: menu,
+            title: "Copy Selected Diff (Left) to Clipboard",
+            action: .copyLeftDifference,
+            keyEquivalent: "1",
+            modifiers: [.command],
+            enabled: row.kind != .unchanged
+        )
+        addItem(
+            to: menu,
+            title: "Copy Selected Diff (Right) to Clipboard",
+            action: .copyRightDifference,
+            keyEquivalent: "2",
+            modifiers: [.command],
+            enabled: row.kind != .unchanged
+        )
+        menu.addItem(.separator())
+
+        addItem(
+            to: menu,
+            title: "Select Line Difference",
+            action: .selectLineDifference,
+            keyEquivalent: "\u{F707}",
+            enabled: actions.canSelectLineDifference()
+        )
+        addUnsupportedSubmenu(
+            to: menu,
+            title: "Add to Filters",
+            items: ["Add to Display Filter", "Add to Line Filters", "Add to Substitution Filters"]
+        )
+        menu.addItem(.separator())
+
+        addItem(to: menu, title: "Undo", action: .undo, enabled: actions.canUndo())
+        addItem(to: menu, title: "Redo", action: .redo, enabled: actions.canRedo())
+        menu.addItem(.separator())
+
+        let selectionExists = textView.selectedRange().length > 0
+        addItem(to: menu, title: "Cut", action: .cut, enabled: textView.isEditable && selectionExists)
+        addItem(to: menu, title: "Copy", action: .copy, enabled: selectionExists)
+        addItem(
+            to: menu,
+            title: "Paste",
+            action: .paste,
+            enabled: textView.isEditable && NSPasteboard.general.canReadItem(withDataConformingToTypes: [UTType.plainText.identifier])
+        )
+        menu.addItem(.separator())
+
+        addUnsupportedSubmenu(to: menu, title: "Scripts", items: ["< Empty >"])
+        menu.addItem(.separator())
+
+        addDisabledItem(to: menu, title: "Go to...", keyEquivalent: "g", modifiers: [.command])
+        addDisabledItem(to: menu, title: "Go to Definition", keyEquivalent: "\u{F70F}")
+        addDisabledItem(to: menu, title: "Go to Moved Line Between Left and Right")
+        menu.addItem(.separator())
+
+        let hasFile = actions.fileURL(side) != nil
+        let openMenu = NSMenu(title: "Open")
+        openMenu.autoenablesItems = false
+        addItem(
+            to: openMenu,
+            title: "With Registered Application",
+            action: .openDefault,
+            enabled: hasFile
+        )
+        addDisabledItem(to: openMenu, title: "With External Editor")
+        addDisabledItem(to: openMenu, title: "With...")
+        addItem(
+            to: openMenu,
+            title: "Open Parent Folder...",
+            action: .revealInFinder,
+            enabled: hasFile
+        )
+        let openItem = NSMenuItem(title: "Open", action: nil, keyEquivalent: "")
+        openItem.submenu = openMenu
+        menu.addItem(openItem)
+        addDisabledItem(to: menu, title: "Shell Menu")
+        contextMenuItemCount = menu.items.count
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        while menu.items.count > contextMenuItemCount {
+            menu.removeItem(at: menu.items.count - 1)
+        }
+    }
+
+    @objc private func performContextAction(_ sender: NSMenuItem) {
+        guard let action = ContextAction(rawValue: sender.tag),
+              let row = contextMenuRow,
+              let side = contextMenuSide,
+              let actions = contextMenuActions else { return }
+        switch action {
+        case .copyToOther:
+            actions.merge(row.id, side == .left ? .leftToRight : .rightToLeft)
+        case .copyFromOther:
+            actions.merge(row.id, side == .left ? .rightToLeft : .leftToRight)
+        case .copyLeftDifference:
+            copyDifferenceToPasteboard(row.left?.text ?? "")
+        case .copyRightDifference:
+            copyDifferenceToPasteboard(row.right?.text ?? "")
+        case .selectLineDifference:
+            actions.selectLineDifference()
+        case .undo:
+            actions.undo()
+        case .redo:
+            actions.redo()
+        case .cut:
+            textView.cut(nil)
+        case .copy:
+            textView.copy(nil)
+        case .paste:
+            textView.paste(nil)
+        case .openDefault:
+            if let url = actions.fileURL(side) { NSWorkspace.shared.open(url) }
+        case .revealInFinder:
+            if let url = actions.fileURL(side) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+    }
+
+    private func addItem(
+        to menu: NSMenu,
+        title: String,
+        action: ContextAction,
+        keyEquivalent: String = "",
+        modifiers: NSEvent.ModifierFlags = [],
+        enabled: Bool
+    ) {
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(performContextAction(_:)),
+            keyEquivalent: keyEquivalent
+        )
+        item.target = self
+        item.tag = action.rawValue
+        item.keyEquivalentModifierMask = modifiers
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    private func addDisabledItem(
+        to menu: NSMenu,
+        title: String,
+        keyEquivalent: String = "",
+        modifiers: NSEvent.ModifierFlags = []
+    ) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: keyEquivalent)
+        item.keyEquivalentModifierMask = modifiers
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func addUnsupportedSubmenu(to menu: NSMenu, title: String, items: [String]) {
+        let submenu = NSMenu(title: title)
+        submenu.autoenablesItems = false
+        for title in items {
+            addDisabledItem(to: submenu, title: title)
+        }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        menu.addItem(item)
+    }
+
+    private func copyDifferenceToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func setDifferenceRange(_ range: NSRange?) {
+        differenceRange = range
+        guard let layoutManager = textView.layoutManager else { return }
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+        guard let range else { return }
+        let visibleRange = NSIntersectionRange(range, fullRange)
+        guard visibleRange.length > 0 else { return }
+        layoutManager.addTemporaryAttribute(
+            .backgroundColor,
+            value: NSColor.systemOrange.withAlphaComponent(0.48),
+            forCharacterRange: visibleRange
+        )
+    }
+
+    func selectDifferenceRange() {
+        guard let differenceRange,
+              textView.window?.makeFirstResponder(textView) == true else { return }
+        textView.setSelectedRange(differenceRange)
+        textView.scrollRangeToVisible(differenceRange)
     }
 
     override func prepareForReuse() {
@@ -2643,12 +3431,20 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate {
         commitIfChanged()
         finishHandler?()
         commitHandler = nil
+        activateHandler = nil
         finishHandler = nil
         continueAfterNewlineHandler = nil
+        contextMenuRow = nil
+        contextMenuSide = nil
+        contextMenuActions = nil
     }
 
     func textDidChange(_ notification: Notification) {
         commitIfChanged()
+    }
+
+    func textDidBeginEditing(_ notification: Notification) {
+        activateHandler?()
     }
 
     func textDidEndEditing(_ notification: Notification) {

@@ -47,19 +47,19 @@ final class ComparisonModelTests: XCTestCase {
         let insertionRow = DiffRow.ID(leftNumber: nil, rightNumber: nil)
         model.createEmptyComparison()
 
-        model.editScratchpadLine(
+        model.editLine(
             rowID: insertionRow,
             on: .left,
             replacement: "test\nkek\ntesting"
         )
-        model.finishScratchpadLineEditing(rowID: insertionRow, on: .left)
+        model.finishLineEditing(rowID: insertionRow, on: .left)
         await waitUntil { model.left.text == "test\nkek\ntesting" && model.isComparisonCurrent }
-        model.editScratchpadLine(
+        model.editLine(
             rowID: insertionRow,
             on: .right,
             replacement: "test\nlol\ntesting"
         )
-        model.finishScratchpadLineEditing(rowID: insertionRow, on: .right)
+        model.finishLineEditing(rowID: insertionRow, on: .right)
         await waitUntil { model.summary.differences == 1 && model.isComparisonCurrent }
 
         XCTAssertEqual(model.rows.map(\.kind), [.unchanged, .modified, .unchanged])
@@ -86,10 +86,10 @@ final class ComparisonModelTests: XCTestCase {
         let insertionRow = DiffRow.ID(leftNumber: nil, rightNumber: nil)
         model.createEmptyComparison()
 
-        model.editScratchpadLine(rowID: insertionRow, on: .left, replacement: "a")
-        model.editScratchpadLine(rowID: insertionRow, on: .left, replacement: "ab")
-        model.editScratchpadLine(rowID: insertionRow, on: .left, replacement: "abc")
-        model.finishScratchpadLineEditing(rowID: insertionRow, on: .left)
+        model.editLine(rowID: insertionRow, on: .left, replacement: "a")
+        model.editLine(rowID: insertionRow, on: .left, replacement: "ab")
+        model.editLine(rowID: insertionRow, on: .left, replacement: "abc")
+        model.finishLineEditing(rowID: insertionRow, on: .left)
         await waitUntil { model.isComparisonCurrent && model.left.text == "abc" }
 
         model.undo()
@@ -111,6 +111,41 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertEqual(model.left.url, leftURL)
         XCTAssertEqual(model.right.url, rightURL)
         XCTAssertTrue(model.isReady)
+    }
+
+    func testLoadedDocumentLineCanBeEditedAndSaved() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "# MacMerge\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "# MacMerge Port Roadmap\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        let rowID = try XCTUnwrap(model.rows.first?.id)
+
+        model.editLine(rowID: rowID, on: .right, replacement: "# MacMerge")
+        model.finishLineEditing(rowID: rowID, on: .right)
+        await waitUntil { model.isComparisonCurrent && model.summary.differences == 0 }
+
+        XCTAssertTrue(model.right.isDirty)
+        let saved = await withCheckedContinuation { continuation in
+            model.save(.right) { continuation.resume(returning: $0) }
+        }
+        await waitUntilIdle(model)
+        XCTAssertTrue(saved)
+        XCTAssertFalse(model.right.isDirty)
+        XCTAssertEqual(try String(contentsOf: rightURL, encoding: .utf8), "# MacMerge\n")
+    }
+
+    func testIntralineDifferenceRangePreservesGraphemeBoundaries() {
+        let text = "# MacMerge Port Roadmap"
+
+        XCTAssertEqual(
+            intralineDifferenceRange(in: text, comparedWith: "# MacMerge"),
+            NSRange(location: 10, length: 13)
+        )
+        XCTAssertEqual(
+            intralineDifferenceRange(in: "café noir", comparedWith: "café blanc"),
+            NSRange(location: 6, length: 4)
+        )
     }
 
     func testTwoFileOpenFailurePreservesExistingComparison() async throws {
@@ -247,6 +282,94 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertFalse(model.canSelectNextDifference)
         model.selectNextDifference()
         XCTAssertEqual(model.selectedDifferenceID, differenceIDs.last)
+    }
+
+    func testNavigationUsesCurrentUnchangedRowWhenNoDifferenceIsSelected() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "one\nsame\ntwo\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "ONE\nsame\nTWO\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        let unchanged = try XCTUnwrap(model.rows.first(where: { $0.kind == .unchanged }))
+        let differences = model.rows.filter { $0.kind != .unchanged }.map(\.id)
+
+        model.activateRow(unchanged.id)
+        XCTAssertNil(model.selectedDifferenceID)
+        XCTAssertFalse(model.canSelectCurrentDifference)
+
+        model.selectNextDifference()
+        XCTAssertEqual(model.selectedDifferenceID, differences.last)
+        model.activateRow(unchanged.id)
+        model.selectPreviousDifference()
+        XCTAssertEqual(model.selectedDifferenceID, differences.first)
+    }
+
+    func testCurrentDifferenceRequestsRevealWithoutChangingSelection() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "one\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "ONE\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        model.selectFirstDifference()
+        let selected = model.selectedDifferenceID
+        let revision = model.selectedDifferenceRevealRevision
+
+        model.selectCurrentDifference()
+
+        XCTAssertEqual(model.selectedDifferenceID, selected)
+        XCTAssertEqual(model.selectedDifferenceRevealRevision, revision + 1)
+    }
+
+    func testSelectLineDifferenceRequestsRevealAndTextSelection() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "MacMerge\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "MacMerge Port\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        model.selectFirstDifference()
+        let revealRevision = model.selectedDifferenceRevealRevision
+        let selectionRevision = model.lineDifferenceSelectionRevision
+
+        model.selectLineDifference()
+
+        XCTAssertEqual(model.selectedDifferenceRevealRevision, revealRevision + 1)
+        XCTAssertEqual(model.lineDifferenceSelectionRevision, selectionRevision + 1)
+    }
+
+    func testRefreshRecomparesMemoryWithoutReadingChangedDiskFile() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "one\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "two\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        let rowID = try XCTUnwrap(model.rows.first?.id)
+        model.editLine(rowID: rowID, on: .right, replacement: "one")
+        model.finishLineEditing(rowID: rowID, on: .right)
+        await waitUntil { model.isComparisonCurrent && model.summary.differences == 0 }
+        try Data("changed on disk\n".utf8).write(to: rightURL)
+
+        model.refresh()
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.right.text, "one\n")
+        XCTAssertTrue(model.right.isDirty)
+        XCTAssertEqual(model.summary.differences, 0)
+    }
+
+    func testComparisonOptionsRecompareCurrentBuffers() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "MacMerge\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "MACMERGE\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        XCTAssertEqual(model.summary.differences, 1)
+        var options = model.options
+        options.ignoreCase = true
+
+        model.setOptions(options)
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.summary.differences, 0)
     }
 
     func testSaveAllCompletionCanAcceptPendingExternalOpen() async throws {
@@ -416,8 +539,8 @@ final class ComparisonModelTests: XCTestCase {
         let insertionRow = DiffRow.ID(leftNumber: nil, rightNumber: nil)
         let model = ComparisonModel()
         model.createEmptyComparison()
-        model.editScratchpadLine(rowID: insertionRow, on: .left, replacement: "draft")
-        model.finishScratchpadLineEditing(rowID: insertionRow, on: .left)
+        model.editLine(rowID: insertionRow, on: .left, replacement: "draft")
+        model.finishLineEditing(rowID: insertionRow, on: .left)
         await waitUntil { model.isComparisonCurrent && model.left.text == "draft" }
 
         let saved = await withCheckedContinuation { continuation in
