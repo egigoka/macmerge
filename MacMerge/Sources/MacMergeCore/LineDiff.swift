@@ -8,7 +8,7 @@ public enum DiffKind: Equatable, Sendable {
     case added
 }
 
-public enum DiffAlgorithm: Equatable, Sendable {
+public enum DiffAlgorithm: String, Codable, Equatable, Sendable {
     case `default`
     case minimal
     case patience
@@ -16,13 +16,41 @@ public enum DiffAlgorithm: Equatable, Sendable {
     case none
 }
 
-public enum WhitespaceComparison: Equatable, Sendable {
+public enum WhitespaceComparison: String, Codable, Equatable, Sendable {
     case compareAll
     case ignoreChanges
     case ignoreAll
 }
 
-public struct LineFilterRule: Equatable, Sendable {
+public enum CommentSyntax: Equatable, Sendable {
+    case cFamily
+    case hashLine
+    case python
+    case sql
+    case markup
+
+    public init?(fileExtension: String) {
+        switch fileExtension.lowercased() {
+        case "c", "cc", "cpp", "cppm", "ixx", "cxx", "h", "hm", "hpp", "hxx", "inl", "rh", "tlh",
+             "tli", "xs", "cs", "java", "jav":
+            self = .cFamily
+        case "pl", "pm", "plx", "po", "pot", "ps1", "psm1", "psd1", "rb", "rbw", "rake", "gemspec",
+             "sh", "conf", "tcl":
+            self = .hashLine
+        case "py":
+            self = .python
+        case "sql":
+            self = .sql
+        case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
+             "mkd", "mkdn", "sgml", "xml":
+            self = .markup
+        default:
+            return nil
+        }
+    }
+}
+
+public struct LineFilterRule: Codable, Equatable, Sendable {
     public var pattern: String
     public var caseSensitive: Bool
 
@@ -32,7 +60,7 @@ public struct LineFilterRule: Equatable, Sendable {
     }
 }
 
-public struct SubstitutionRule: Equatable, Sendable {
+public struct SubstitutionRule: Codable, Equatable, Sendable {
     public var pattern: String
     public var replacement: String
     public var caseSensitive: Bool
@@ -44,16 +72,20 @@ public struct SubstitutionRule: Equatable, Sendable {
     }
 }
 
-public struct LineDiffOptions: Equatable, Sendable {
+public struct LineDiffOptions: Codable, Equatable, Sendable {
     public var algorithm: DiffAlgorithm
     public var whitespace: WhitespaceComparison
     public var ignoreCase: Bool
     public var ignoreNumbers: Bool
     public var ignoreBlankLines: Bool
+    public var ignoreComments: Bool
     public var ignoreLineEndings: Bool
     public var indentHeuristic: Bool
+    public var lineFiltersEnabled: Bool
     public var lineFilters: [LineFilterRule]
+    public var substitutionsEnabled: Bool
     public var substitutions: [SubstitutionRule]
+    public var commentSyntax: CommentSyntax?
 
     public init(
         algorithm: DiffAlgorithm = .default,
@@ -61,20 +93,76 @@ public struct LineDiffOptions: Equatable, Sendable {
         ignoreCase: Bool = false,
         ignoreNumbers: Bool = false,
         ignoreBlankLines: Bool = false,
+        ignoreComments: Bool = false,
         ignoreLineEndings: Bool = true,
         indentHeuristic: Bool = false,
+        lineFiltersEnabled: Bool = true,
         lineFilters: [LineFilterRule] = [],
-        substitutions: [SubstitutionRule] = []
+        substitutionsEnabled: Bool = true,
+        substitutions: [SubstitutionRule] = [],
+        commentSyntax: CommentSyntax? = nil
     ) {
         self.algorithm = algorithm
         self.whitespace = whitespace
         self.ignoreCase = ignoreCase
         self.ignoreNumbers = ignoreNumbers
         self.ignoreBlankLines = ignoreBlankLines
+        self.ignoreComments = ignoreComments
         self.ignoreLineEndings = ignoreLineEndings
         self.indentHeuristic = indentHeuristic
+        self.lineFiltersEnabled = lineFiltersEnabled
         self.lineFilters = lineFilters
+        self.substitutionsEnabled = substitutionsEnabled
         self.substitutions = substitutions
+        self.commentSyntax = commentSyntax
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case algorithm
+        case whitespace
+        case ignoreCase
+        case ignoreNumbers
+        case ignoreBlankLines
+        case ignoreComments
+        case ignoreLineEndings
+        case indentHeuristic
+        case lineFiltersEnabled
+        case lineFilters
+        case substitutionsEnabled
+        case substitutions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        algorithm = try container.decodeIfPresent(DiffAlgorithm.self, forKey: .algorithm) ?? .default
+        whitespace = try container.decodeIfPresent(WhitespaceComparison.self, forKey: .whitespace) ?? .compareAll
+        ignoreCase = try container.decodeIfPresent(Bool.self, forKey: .ignoreCase) ?? false
+        ignoreNumbers = try container.decodeIfPresent(Bool.self, forKey: .ignoreNumbers) ?? false
+        ignoreBlankLines = try container.decodeIfPresent(Bool.self, forKey: .ignoreBlankLines) ?? false
+        ignoreComments = try container.decodeIfPresent(Bool.self, forKey: .ignoreComments) ?? false
+        ignoreLineEndings = try container.decodeIfPresent(Bool.self, forKey: .ignoreLineEndings) ?? true
+        indentHeuristic = try container.decodeIfPresent(Bool.self, forKey: .indentHeuristic) ?? false
+        lineFiltersEnabled = try container.decodeIfPresent(Bool.self, forKey: .lineFiltersEnabled) ?? true
+        lineFilters = try container.decodeIfPresent([LineFilterRule].self, forKey: .lineFilters) ?? []
+        substitutionsEnabled = try container.decodeIfPresent(Bool.self, forKey: .substitutionsEnabled) ?? true
+        substitutions = try container.decodeIfPresent([SubstitutionRule].self, forKey: .substitutions) ?? []
+        commentSyntax = nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(algorithm, forKey: .algorithm)
+        try container.encode(whitespace, forKey: .whitespace)
+        try container.encode(ignoreCase, forKey: .ignoreCase)
+        try container.encode(ignoreNumbers, forKey: .ignoreNumbers)
+        try container.encode(ignoreBlankLines, forKey: .ignoreBlankLines)
+        try container.encode(ignoreComments, forKey: .ignoreComments)
+        try container.encode(ignoreLineEndings, forKey: .ignoreLineEndings)
+        try container.encode(indentHeuristic, forKey: .indentHeuristic)
+        try container.encode(lineFiltersEnabled, forKey: .lineFiltersEnabled)
+        try container.encode(lineFilters, forKey: .lineFilters)
+        try container.encode(substitutionsEnabled, forKey: .substitutionsEnabled)
+        try container.encode(substitutions, forKey: .substitutions)
     }
 }
 
@@ -84,7 +172,7 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
     case tooManyLines(maximumLines: Int)
     case invalidRegularExpression(String)
     case filterChangedLineStructure
-    case unsupportedSubstitutionByte(Int)
+    case rawBytePlaceholderUnavailable
     case invalidNativeResult
 
     public var errorDescription: String? {
@@ -99,8 +187,8 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
             "Invalid comparison filter regular expression: \(pattern)"
         case .filterChangedLineStructure:
             "A substitution inserted a line ending. Comparison substitutions must preserve line structure."
-        case let .unsupportedSubstitutionByte(byte):
-            "Substitution byte \\x\(String(byte, radix: 16, uppercase: true)) is not valid UTF-8 text. Raw-byte substitutions are not supported yet."
+        case .rawBytePlaceholderUnavailable:
+            "Raw-byte substitutions could not reserve a collision-free placeholder range."
         case .invalidNativeResult:
             "WinMerge comparison engine returned invalid line ranges."
         }
@@ -128,13 +216,15 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    public let id: ID
     public let left: DiffLine?
     public let right: DiffLine?
     public let kind: DiffKind
 
-    public init(id: ID, left: DiffLine?, right: DiffLine?, kind: DiffKind) {
-        self.id = id
+    public var id: ID {
+        ID(leftNumber: left?.number, rightNumber: right?.number)
+    }
+
+    public init(left: DiffLine?, right: DiffLine?, kind: DiffKind) {
         self.left = left
         self.right = right
         self.kind = kind
@@ -188,11 +278,10 @@ public enum LineDiff {
         let leftDocument = TextDocument(text: leftText)
         let rightDocument = TextDocument(text: rightText)
         let transform = try ComparisonTransform(options: options)
-        let left = leftDocument.lines
-        let right = rightDocument.lines
+        let commentFiltered = transform.commentFilteredPair(left: leftDocument, right: rightDocument)
         let hunks = try nativeHunks(
-            left: leftDocument.comparisonText(contents: left, options: options),
-            right: rightDocument.comparisonText(contents: right, options: options),
+            left: leftDocument.comparisonText(options: options),
+            right: rightDocument.comparisonText(options: options),
             options: options
         )
         var rows: [DiffRow] = []
@@ -202,18 +291,18 @@ public enum LineDiff {
         for hunk in hunks {
             guard hunk.leftStart >= leftIndex,
                   hunk.rightStart >= rightIndex,
-                  hunk.leftStart <= left.count,
-                  hunk.rightStart <= right.count,
-                  hunk.leftCount <= left.count - hunk.leftStart,
-                  hunk.rightCount <= right.count - hunk.rightStart,
+                  hunk.leftStart <= leftDocument.records.count,
+                  hunk.rightStart <= rightDocument.records.count,
+                  hunk.leftCount <= leftDocument.records.count - hunk.leftStart,
+                  hunk.rightCount <= rightDocument.records.count - hunk.rightStart,
                   hunk.leftStart - leftIndex == hunk.rightStart - rightIndex else {
                 throw LineDiffError.invalidNativeResult
             }
 
             while leftIndex < hunk.leftStart {
                 rows.append(row(
-                    left: line(at: leftIndex, in: left),
-                    right: line(at: rightIndex, in: right),
+                    left: line(at: leftIndex, in: leftDocument),
+                    right: line(at: rightIndex, in: rightDocument),
                     kind: .unchanged
                 ))
                 leftIndex += 1
@@ -227,6 +316,7 @@ public enum LineDiff {
                     leftDocument: leftDocument,
                     rightDocument: rightDocument,
                     transform: transform,
+                    commentFiltered: commentFiltered,
                     options: options,
                     leftIndex: &leftIndex,
                     rightIndex: &rightIndex
@@ -235,23 +325,23 @@ public enum LineDiff {
                 appendChangedRows(
                     to: &rows,
                     hunk: hunk,
-                    left: left,
-                    right: right,
-                    leftFiltered: Array(repeating: false, count: left.count),
-                    rightFiltered: Array(repeating: false, count: right.count),
+                    left: leftDocument,
+                    right: rightDocument,
+                    leftFiltered: nil,
+                    rightFiltered: nil,
                     leftIndex: &leftIndex,
                     rightIndex: &rightIndex
                 )
             }
         }
 
-        guard left.count - leftIndex == right.count - rightIndex else {
+        guard leftDocument.records.count - leftIndex == rightDocument.records.count - rightIndex else {
             throw LineDiffError.invalidNativeResult
         }
-        while leftIndex < left.count {
+        while leftIndex < leftDocument.records.count {
             rows.append(row(
-                left: line(at: leftIndex, in: left),
-                right: line(at: rightIndex, in: right),
+                left: line(at: leftIndex, in: leftDocument),
+                right: line(at: rightIndex, in: rightDocument),
                 kind: .unchanged
             ))
             leftIndex += 1
@@ -261,8 +351,12 @@ public enum LineDiff {
         return rows
     }
 
-    private static func line(at index: Int, in lines: [String], numberOffset: Int = 0) -> DiffLine {
-        DiffLine(number: numberOffset + index + 1, text: lines[index])
+    private static func line(
+        at index: Int,
+        in document: TextDocument,
+        numberOffset: Int = 0
+    ) -> DiffLine {
+        DiffLine(number: numberOffset + index + 1, text: document.records[index].content)
     }
 
     private static func validateInput(_ text: String) throws {
@@ -290,7 +384,6 @@ public enum LineDiff {
 
     private static func row(left: DiffLine?, right: DiffLine?, kind: DiffKind) -> DiffRow {
         DiffRow(
-            id: DiffRow.ID(leftNumber: left?.number, rightNumber: right?.number),
             left: left,
             right: right,
             kind: kind
@@ -300,10 +393,10 @@ public enum LineDiff {
     private static func appendChangedRows(
         to rows: inout [DiffRow],
         hunk: NativeHunk,
-        left: [String],
-        right: [String],
-        leftFiltered: [Bool],
-        rightFiltered: [Bool],
+        left: TextDocument,
+        right: TextDocument,
+        leftFiltered: [Bool]?,
+        rightFiltered: [Bool]?,
         leftIndex: inout Int,
         rightIndex: inout Int,
         leftNumberOffset: Int = 0,
@@ -315,8 +408,8 @@ public enum LineDiff {
         while leftIndex < leftEnd || rightIndex < rightEnd {
             let hasLeft = leftIndex < leftEnd
             let hasRight = rightIndex < rightEnd
-            let leftIsFiltered = hasLeft && leftFiltered[leftIndex]
-            let rightIsFiltered = hasRight && rightFiltered[rightIndex]
+            let leftIsFiltered = hasLeft && leftFiltered?[leftIndex] == true
+            let rightIsFiltered = hasRight && rightFiltered?[rightIndex] == true
 
             if hunk.isTrivial || (leftIsFiltered && rightIsFiltered) {
                 let leftLine = hasLeft ? line(at: leftIndex, in: left, numberOffset: leftNumberOffset) : nil
@@ -370,37 +463,43 @@ public enum LineDiff {
         leftDocument: TextDocument,
         rightDocument: TextDocument,
         transform: ComparisonTransform,
+        commentFiltered: ComparisonTransform.CommentFilteredPair?,
         options: LineDiffOptions,
         leftIndex: inout Int,
         rightIndex: inout Int
     ) throws {
         let leftSlice = leftDocument.slice(start: hunk.leftStart, count: hunk.leftCount)
         let rightSlice = rightDocument.slice(start: hunk.rightStart, count: hunk.rightCount)
-        let prepared = try transform.prepare(left: leftSlice, right: rightSlice, options: options)
+        let prepared = try transform.prepare(
+            left: leftSlice,
+            right: rightSlice,
+            options: options,
+            leftComments: commentFiltered?.left.slice(start: hunk.leftStart, count: hunk.leftCount),
+            rightComments: commentFiltered?.right.slice(start: hunk.rightStart, count: hunk.rightCount)
+        )
         let secondaryHunks = try nativeHunks(
             left: prepared.left.text,
             right: prepared.right.text,
-            options: options
+            options: options,
+            rawByteEncoding: prepared.rawByteEncoding
         )
-        let left = leftSlice.lines
-        let right = rightSlice.lines
         var localLeftIndex = 0
         var localRightIndex = 0
 
         for secondary in secondaryHunks {
             guard secondary.leftStart >= localLeftIndex,
                   secondary.rightStart >= localRightIndex,
-                  secondary.leftStart <= left.count,
-                  secondary.rightStart <= right.count,
-                  secondary.leftCount <= left.count - secondary.leftStart,
-                  secondary.rightCount <= right.count - secondary.rightStart,
+                  secondary.leftStart <= leftSlice.records.count,
+                  secondary.rightStart <= rightSlice.records.count,
+                  secondary.leftCount <= leftSlice.records.count - secondary.leftStart,
+                  secondary.rightCount <= rightSlice.records.count - secondary.rightStart,
                   secondary.leftStart - localLeftIndex == secondary.rightStart - localRightIndex else {
                 throw LineDiffError.invalidNativeResult
             }
             while localLeftIndex < secondary.leftStart {
                 rows.append(row(
-                    left: line(at: localLeftIndex, in: left, numberOffset: hunk.leftStart),
-                    right: line(at: localRightIndex, in: right, numberOffset: hunk.rightStart),
+                    left: line(at: localLeftIndex, in: leftSlice, numberOffset: hunk.leftStart),
+                    right: line(at: localRightIndex, in: rightSlice, numberOffset: hunk.rightStart),
                     kind: .unchanged
                 ))
                 localLeftIndex += 1
@@ -409,8 +508,8 @@ public enum LineDiff {
             appendChangedRows(
                 to: &rows,
                 hunk: secondary,
-                left: left,
-                right: right,
+                left: leftSlice,
+                right: rightSlice,
                 leftFiltered: prepared.left.filteredLines,
                 rightFiltered: prepared.right.filteredLines,
                 leftIndex: &localLeftIndex,
@@ -420,13 +519,13 @@ public enum LineDiff {
             )
         }
 
-        guard left.count - localLeftIndex == right.count - localRightIndex else {
+        guard leftSlice.records.count - localLeftIndex == rightSlice.records.count - localRightIndex else {
             throw LineDiffError.invalidNativeResult
         }
-        while localLeftIndex < left.count {
+        while localLeftIndex < leftSlice.records.count {
             rows.append(row(
-                left: line(at: localLeftIndex, in: left, numberOffset: hunk.leftStart),
-                right: line(at: localRightIndex, in: right, numberOffset: hunk.rightStart),
+                left: line(at: localLeftIndex, in: leftSlice, numberOffset: hunk.leftStart),
+                right: line(at: localRightIndex, in: rightSlice, numberOffset: hunk.rightStart),
                 kind: .unchanged
             ))
             localLeftIndex += 1
@@ -439,14 +538,15 @@ public enum LineDiff {
     private static func nativeHunks(
         left: String,
         right: String,
-        options: LineDiffOptions
+        options: LineDiffOptions,
+        rawByteEncoding: RawByteEncoding? = nil
     ) throws -> [NativeHunk] {
         let maximumBytes = Int(MMX_MAX_INPUT_SIZE)
-        guard left.utf8.count <= maximumBytes, right.utf8.count <= maximumBytes else {
+        let leftBytes = rawByteEncoding?.encode(left) ?? Array(left.utf8)
+        let rightBytes = rawByteEncoding?.encode(right) ?? Array(right.utf8)
+        guard leftBytes.count <= maximumBytes, rightBytes.count <= maximumBytes else {
             throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
         }
-        let leftBytes = Array(left.utf8)
-        let rightBytes = Array(right.utf8)
         var result = mmx_diff_result(hunks: nil, count: 0)
         let status = leftBytes.withUnsafeBytes { leftBuffer in
             rightBytes.withUnsafeBytes { rightBuffer in
@@ -508,12 +608,82 @@ private struct PreparedComparison {
 private struct PreparedComparisonPair {
     let left: PreparedComparison
     let right: PreparedComparison
+    let rawByteEncoding: RawByteEncoding?
+}
+
+private struct RawByteEncoding {
+    private let scalarBase: UInt32
+
+    init(reservedStrings: [String]) throws {
+        let candidateBases = Array(stride(from: UInt32(0xF0000), through: 0xFFF00, by: 128))
+            + Array(stride(from: UInt32(0x100000), through: 0x10FF00, by: 128))
+        var occupied = Set<UInt32>()
+        for string in reservedStrings {
+            for scalar in string.unicodeScalars {
+                let value = scalar.value
+                if (0xF0000...0xFFFFD).contains(value) {
+                    occupied.insert(0xF0000 + (value - 0xF0000) / 128 * 128)
+                } else if (0x100000...0x10FFFD).contains(value) {
+                    occupied.insert(0x100000 + (value - 0x100000) / 128 * 128)
+                }
+            }
+        }
+        guard let scalarBase = candidateBases.first(where: { !occupied.contains($0) }) else {
+            throw LineDiffError.rawBytePlaceholderUnavailable
+        }
+        self.scalarBase = scalarBase
+    }
+
+    func placeholder(for byte: UInt8) -> UnicodeScalar {
+        precondition(byte >= 0x80)
+        return UnicodeScalar(scalarBase + UInt32(byte - 0x80))!
+    }
+
+    func encode(_ text: String) -> [UInt8] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(text.utf8.count)
+        for scalar in text.unicodeScalars {
+            if scalar.value >= scalarBase, scalar.value < scalarBase + 128 {
+                bytes.append(UInt8(scalar.value - scalarBase) + 0x80)
+            } else {
+                bytes.append(contentsOf: String(scalar).utf8)
+            }
+        }
+        return bytes
+    }
+
+    func byteCount(_ text: Substring) -> Int {
+        text.unicodeScalars.reduce(into: 0) { count, scalar in
+            count += scalar.value >= scalarBase && scalar.value < scalarBase + 128
+                ? 1
+                : String(scalar).utf8.count
+        }
+    }
 }
 
 private struct ComparisonTransform {
+    struct CommentFilteredContents {
+        let contents: [String]
+        let commentOnly: [Bool]
+
+        func slice(start: Int, count: Int) -> CommentFilteredContents {
+            let range = start..<(start + count)
+            return CommentFilteredContents(
+                contents: Array(contents[range]),
+                commentOnly: Array(commentOnly[range])
+            )
+        }
+    }
+
+    struct CommentFilteredPair {
+        let left: CommentFilteredContents
+        let right: CommentFilteredContents
+    }
+
     private enum ReplacementPart {
         case literal(String)
         case capture(Int)
+        case rawByte(UInt8)
     }
 
     private struct CompiledRule {
@@ -523,53 +693,89 @@ private struct ComparisonTransform {
 
     private let lineFilters: [CompiledRule]
     private let substitutions: [CompiledRule]
+    private let commentSyntax: CommentSyntax?
 
-    var isActive: Bool { !lineFilters.isEmpty || !substitutions.isEmpty }
+    var isActive: Bool { commentSyntax != nil || !lineFilters.isEmpty || !substitutions.isEmpty }
 
     init(options: LineDiffOptions) throws {
-        lineFilters = try options.lineFilters.map {
+        lineFilters = try (options.lineFiltersEnabled ? options.lineFilters : []).map {
             CompiledRule(
                 expression: try Self.compile(pattern: $0.pattern, caseSensitive: $0.caseSensitive),
                 replacement: nil
             )
         }
-        substitutions = try options.substitutions.map {
+        substitutions = try (options.substitutionsEnabled ? options.substitutions : []).map {
             CompiledRule(
                 expression: try Self.compile(pattern: $0.pattern, caseSensitive: $0.caseSensitive),
                 replacement: try Self.parseReplacement($0.replacement)
             )
         }
+        commentSyntax = options.ignoreComments ? options.commentSyntax : nil
     }
 
     func prepare(
         left: TextDocument,
         right: TextDocument,
-        options: LineDiffOptions
+        options: LineDiffOptions,
+        leftComments: CommentFilteredContents? = nil,
+        rightComments: CommentFilteredContents? = nil
     ) throws -> PreparedComparisonPair {
         let marker = collisionFreeMarker(left: left.text, right: right.text)
+        let usesRawBytes = substitutions.contains { rule in
+            rule.replacement?.contains { part in
+                if case .rawByte = part { return true }
+                return false
+            } == true
+        }
+        let replacementLiterals: [String] = substitutions.flatMap { rule -> [String] in
+            rule.replacement?.compactMap { part -> String? in
+                if case let .literal(value) = part { return value }
+                return nil
+            } ?? []
+        }
+        let rawByteEncoding = usesRawBytes
+            ? try RawByteEncoding(reservedStrings: [left.text, right.text] + replacementLiterals)
+            : nil
         return try PreparedComparisonPair(
-            left: prepare(document: left, marker: marker, options: options),
-            right: prepare(document: right, marker: marker, options: options)
+            left: prepare(
+                document: left,
+                marker: marker,
+                options: options,
+                rawByteEncoding: rawByteEncoding,
+                commentFiltered: leftComments
+            ),
+            right: prepare(
+                document: right,
+                marker: marker,
+                options: options,
+                rawByteEncoding: rawByteEncoding,
+                commentFiltered: rightComments
+            ),
+            rawByteEncoding: rawByteEncoding
         )
     }
 
     private func prepare(
         document: TextDocument,
         marker: String,
-        options: LineDiffOptions
+        options: LineDiffOptions,
+        rawByteEncoding: RawByteEncoding?,
+        commentFiltered: CommentFilteredContents?
     ) throws -> PreparedComparison {
         var contents: [String] = []
         var filteredLines: [Bool] = []
         let maximumBytes = Int(MMX_MAX_INPUT_SIZE)
+        let commentFiltered = commentFiltered ?? commentFilteredContents(in: document)
         contents.reserveCapacity(document.records.count)
         filteredLines.reserveCapacity(document.records.count)
 
-        for record in document.records {
-            let fullRange = NSRange(record.content.startIndex..<record.content.endIndex, in: record.content)
-            let isFiltered = lineFilters.contains {
-                $0.expression.firstMatch(in: record.content, range: fullRange) != nil
+        for (index, record) in document.records.enumerated() {
+            let content = commentFiltered?.contents[index] ?? record.content
+            let fullRange = NSRange(content.startIndex..<content.endIndex, in: content)
+            let isFiltered = commentFiltered?.commentOnly[index] == true || lineFilters.contains {
+                $0.expression.firstMatch(in: content, range: fullRange) != nil
             }
-            contents.append(isFiltered ? marker : record.content)
+            contents.append(isFiltered ? marker : content)
             filteredLines.append(isFiltered)
         }
 
@@ -582,7 +788,8 @@ private struct ComparisonTransform {
                 in: transformedText,
                 using: substitution.expression,
                 replacement: replacement,
-                maximumBytes: maximumBytes
+                maximumBytes: maximumBytes,
+                rawByteEncoding: rawByteEncoding
             )
         }
         let transformed = TextDocument(text: transformedText)
@@ -600,6 +807,143 @@ private struct ComparisonTransform {
             text: transformed.comparisonText(contents: comparisonContents, options: options),
             filteredLines: filteredLines
         )
+    }
+
+    func commentFilteredPair(left: TextDocument, right: TextDocument) -> CommentFilteredPair? {
+        guard let left = commentFilteredContents(in: left),
+              let right = commentFilteredContents(in: right) else { return nil }
+        return CommentFilteredPair(left: left, right: right)
+    }
+
+    private func commentFilteredContents(
+        in document: TextDocument
+    ) -> CommentFilteredContents? {
+        guard let commentSyntax else { return nil }
+        let lineDelimiters: [String]
+        let blockDelimiter: (start: String, end: String)?
+        let supportsTripleQuotedStrings: Bool
+        switch commentSyntax {
+        case .cFamily:
+            lineDelimiters = ["//"]
+            blockDelimiter = ("/*", "*/")
+            supportsTripleQuotedStrings = false
+        case .hashLine:
+            lineDelimiters = ["#"]
+            blockDelimiter = nil
+            supportsTripleQuotedStrings = false
+        case .python:
+            lineDelimiters = ["#"]
+            blockDelimiter = nil
+            supportsTripleQuotedStrings = true
+        case .sql:
+            lineDelimiters = ["//", "--"]
+            blockDelimiter = ("/*", "*/")
+            supportsTripleQuotedStrings = false
+        case .markup:
+            lineDelimiters = []
+            blockDelimiter = ("<!--", "-->")
+            supportsTripleQuotedStrings = false
+        }
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        var inMarkupElement = false
+        var quote: Character?
+        var tripleQuote: String?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var escaped = false
+            var containedComment = inBlockComment
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+                let remainder = record.content[index...]
+
+                if inBlockComment {
+                    containedComment = true
+                    if let blockDelimiter, remainder.hasPrefix(blockDelimiter.end) {
+                        inBlockComment = false
+                        index = record.content.index(index, offsetBy: blockDelimiter.end.count)
+                    } else {
+                        index = nextIndex
+                    }
+                    continue
+                }
+
+                if let activeTripleQuote = tripleQuote {
+                    if remainder.hasPrefix(activeTripleQuote) {
+                        output.append(contentsOf: activeTripleQuote)
+                        index = record.content.index(index, offsetBy: activeTripleQuote.count)
+                        tripleQuote = nil
+                    } else {
+                        output.append(character)
+                        index = nextIndex
+                    }
+                    continue
+                }
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == activeQuote {
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+
+                if supportsTripleQuotedStrings,
+                   let delimiter = ["\"\"\"", "'''"].first(where: remainder.hasPrefix) {
+                    tripleQuote = delimiter
+                    output.append(contentsOf: delimiter)
+                    index = record.content.index(index, offsetBy: delimiter.count)
+                    continue
+                }
+                if let blockDelimiter, remainder.hasPrefix(blockDelimiter.start) {
+                    containedComment = true
+                    inBlockComment = true
+                    if commentSyntax == .markup { inMarkupElement = false }
+                    index = record.content.index(index, offsetBy: blockDelimiter.start.count)
+                    continue
+                }
+                if lineDelimiters.contains(where: remainder.hasPrefix) {
+                    containedComment = true
+                    break
+                }
+                if commentSyntax == .markup, character == "<" {
+                    inMarkupElement = true
+                } else if commentSyntax == .markup, character == ">" {
+                    inMarkupElement = false
+                }
+                if (commentSyntax != .markup || inMarkupElement), character == "\"" || character == "'" {
+                    quote = character
+                }
+                output.append(character)
+                index = nextIndex
+            }
+
+            if tripleQuote == nil {
+                if commentSyntax == .markup {
+                    if quote != "\"" { quote = nil }
+                } else if record.content.last != "\\" {
+                    quote = nil
+                }
+            }
+
+            contents.append(output)
+            commentOnly.append(
+                containedComment && output.unicodeScalars.allSatisfy { $0 == " " || $0 == "\t" }
+            )
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
 
     private func collisionFreeMarker(left: String, right: String) -> String {
@@ -652,7 +996,9 @@ private struct ComparisonTransform {
                         if secondHexIndex < replacement.endIndex {
                             let hex = String(replacement[firstHexIndex...secondHexIndex])
                             if let value = UInt8(hex, radix: 16), value > 0x7F {
-                                throw LineDiffError.unsupportedSubstitutionByte(Int(value))
+                                flushLiteral()
+                                parts.append(.rawByte(value))
+                                index = secondHexIndex
                             } else if let value = UInt8(hex, radix: 16),
                                       let scalar = UnicodeScalar(Int(value)) {
                                 literal.unicodeScalars.append(scalar)
@@ -709,7 +1055,8 @@ private struct ComparisonTransform {
         in source: String,
         using expression: NSRegularExpression,
         replacement: [ReplacementPart],
-        maximumBytes: Int
+        maximumBytes: Int,
+        rawByteEncoding: RawByteEncoding?
     ) throws -> String {
         var output = ""
         var outputBytes = 0
@@ -718,7 +1065,7 @@ private struct ComparisonTransform {
         let sourceRange = NSRange(source.startIndex..<source.endIndex, in: source)
 
         func append(_ value: Substring) {
-            let bytes = value.utf8.count
+            let bytes = rawByteEncoding?.byteCount(value) ?? value.utf8.count
             guard bytes <= maximumBytes - outputBytes else {
                 failure = .inputTooLarge(maximumBytes: Int(MMX_MAX_INPUT_SIZE))
                 return
@@ -742,6 +1089,10 @@ private struct ComparisonTransform {
                           match.range(at: group).location != NSNotFound,
                           let range = Range(match.range(at: group), in: source) else { continue }
                     append(source[range])
+                case let .rawByte(byte):
+                    guard let rawByteEncoding else { continue }
+                    let placeholder = String(rawByteEncoding.placeholder(for: byte))
+                    append(placeholder[...])
                 }
             }
             cursor = match.range.location + match.range.length
@@ -868,7 +1219,9 @@ public enum LineMerge {
         options: LineDiffOptions = LineDiffOptions()
     ) throws -> LineMergeResult? {
         let rows = try LineDiff.compare(left: leftText, right: rightText, options: options)
-        guard let rowIndex = rows.firstIndex(where: { $0.id == rowID }),
+        guard let rowIndex = rows.firstIndex(where: {
+            $0.left?.number == rowID.leftNumber && $0.right?.number == rowID.rightNumber
+        }),
               rows[rowIndex].kind != .unchanged else {
             return nil
         }
@@ -877,26 +1230,37 @@ public enum LineMerge {
         var right = TextDocument(text: rightText)
         let leftEnding = left.lineEnding ?? right.lineEnding ?? "\n"
         let rightEnding = right.lineEnding ?? left.lineEnding ?? "\n"
-        let row = rows[rowIndex]
+        let sourceLine: DiffLine?
+        let targetLine: DiffLine?
+        let insertionIndex: Int
 
         switch direction {
         case .leftToRight:
-            let insertionIndex = rows[..<rowIndex].lazy.compactMap(\.right).count
+            sourceLine = rows[rowIndex].left
+            targetLine = rows[rowIndex].right
+            insertionIndex = rows[..<rowIndex].lazy.compactMap(\.right).count
+        case .rightToLeft:
+            sourceLine = rows[rowIndex].right
+            targetLine = rows[rowIndex].left
+            insertionIndex = rows[..<rowIndex].lazy.compactMap(\.left).count
+        }
+
+        switch direction {
+        case .leftToRight:
             apply(
-                source: row.left,
+                source: sourceLine,
                 sourceDocument: left,
-                target: row.right,
+                target: targetLine,
                 insertionIndex: insertionIndex,
                 lineEnding: rightEnding,
                 options: options,
                 to: &right
             )
         case .rightToLeft:
-            let insertionIndex = rows[..<rowIndex].lazy.compactMap(\.left).count
             apply(
-                source: row.right,
+                source: sourceLine,
                 sourceDocument: right,
-                target: row.left,
+                target: targetLine,
                 insertionIndex: insertionIndex,
                 lineEnding: leftEnding,
                 options: options,
@@ -1072,7 +1436,6 @@ private struct TextDocument {
         self.records = records
     }
 
-    var lines: [String] { records.map(\.content) }
     var lineEnding: String? { records.lazy.map(\.terminator).first(where: { !$0.isEmpty }) }
     var text: String {
         records.map { $0.content + $0.terminator }.joined()
@@ -1094,6 +1457,18 @@ private struct TextDocument {
         }
         guard !records.isEmpty else { return "" }
         return contents.joined(separator: "\n") + "\n"
+    }
+
+    func comparisonText(options: LineDiffOptions) -> String {
+        guard options.ignoreLineEndings else { return text }
+        guard !records.isEmpty else { return "" }
+        var result = ""
+        result.reserveCapacity(records.reduce(into: records.count) { $0 += $1.content.utf8.count })
+        for record in records {
+            result += record.content
+            result += "\n"
+        }
+        return result
     }
 
     mutating func insert(

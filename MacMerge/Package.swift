@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "MacMerge", targets: ["MacMerge"]),
+        .executable(name: "MacMergeBenchmark", targets: ["MacMergeBenchmark"]),
         .library(name: "MacMergeCore", targets: ["MacMergeCore"])
     ],
     targets: [
@@ -24,6 +25,11 @@ let package = Package(
         .executableTarget(
             name: "MacMerge",
             dependencies: ["MacMergeCore"]
+        ),
+        .executableTarget(
+            name: "MacMergeBenchmark",
+            dependencies: ["MacMergeCore"],
+            path: "Benchmarks/MacMergeBenchmark"
         ),
         .testTarget(
             name: "MacMergeCoreTests",

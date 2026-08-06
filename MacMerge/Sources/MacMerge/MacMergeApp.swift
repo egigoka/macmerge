@@ -2,8 +2,103 @@ import AppKit
 import Darwin
 import MacMergeCore
 import Observation
+import OSLog
 import SwiftUI
 import UniformTypeIdentifiers
+
+private enum PerformanceTrace {
+    static let log = OSLog(
+        subsystem: "io.github.egigoka.MacMerge",
+        category: .pointsOfInterest
+    )
+
+    static func begin(_ name: StaticString) -> OSSignpostID {
+        let id = OSSignpostID(log: log)
+        os_signpost(.begin, log: log, name: name, signpostID: id)
+        return id
+    }
+
+    static func end(_ name: StaticString, id: OSSignpostID) {
+        os_signpost(.end, log: log, name: name, signpostID: id)
+    }
+}
+
+private final class PerformanceProbe: @unchecked Sendable {
+    static let shared = PerformanceProbe()
+
+    let shouldAutoScroll: Bool
+    private let reportURL: URL?
+    private let lock = NSLock()
+    private var starts: [String: UInt64] = [:]
+    private var metrics: [String: Int] = [:]
+
+    private init() {
+        let environment = ProcessInfo.processInfo.environment
+        reportURL = environment["MACMERGE_PERFORMANCE_REPORT"].map { URL(filePath: $0) }
+        shouldAutoScroll = environment["MACMERGE_PERFORMANCE_AUTOSCROLL"] == "1"
+    }
+
+    func begin(_ phase: String) {
+        guard reportURL != nil else { return }
+        lock.withLock {
+            starts[phase] = DispatchTime.now().uptimeNanoseconds
+        }
+    }
+
+    func end(_ phase: String) {
+        guard reportURL != nil else { return }
+        lock.withLock {
+            guard let start = starts.removeValue(forKey: phase) else { return }
+            metrics["\(phase)_ms"] = Int(
+                (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            )
+            writeReport()
+        }
+    }
+
+    func beginFirstRender(rowCount: Int) {
+        guard reportURL != nil else { return }
+        lock.withLock {
+            metrics["rows"] = rowCount
+            starts["first_render"] = DispatchTime.now().uptimeNanoseconds
+        }
+    }
+
+    func finishScroll() {
+        guard reportURL != nil else { return }
+        lock.withLock {
+            guard let start = starts.removeValue(forKey: "scroll") else { return }
+            metrics["scroll_ms"] = Int(
+                (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            )
+            metrics["resident_mib"] = Int(residentMemoryBytes() / 1_048_576)
+            metrics["complete"] = 1
+            writeReport()
+        }
+    }
+
+    private func writeReport() {
+        guard let reportURL,
+              let data = try? JSONSerialization.data(
+                withJSONObject: metrics,
+                options: [.prettyPrinted, .sortedKeys]
+              ) else { return }
+        try? data.write(to: reportURL, options: .atomic)
+    }
+
+    private func residentMemoryBytes() -> UInt64 {
+        var information = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size
+        )
+        let status = withUnsafeMutablePointer(to: &information) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return status == KERN_SUCCESS ? UInt64(information.resident_size) : 0
+    }
+}
 
 @main
 struct MacMergeApp: App {
@@ -31,7 +126,7 @@ struct MacMergeApp: App {
 
 @MainActor
 private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
-    let model = ComparisonModel()
+    let model = ComparisonModel(userDefaults: .standard)
 
     func openComparison() {
         let panel = NSOpenPanel()
@@ -210,6 +305,17 @@ private struct WinMergeCommands: Commands {
             Button("Save Right", action: { model.save(.right) })
                 .disabled(!model.right.isDirty || model.isWorking)
             Divider()
+            Button("Save Left As...", action: { model.saveAs(.left) })
+                .disabled(!model.left.isLoaded || model.isWorking)
+            Button("Save Right As...", action: { model.saveAs(.right) })
+                .disabled(!model.right.isLoaded || model.isWorking)
+            Divider()
+            Toggle("Merge Mode", isOn: Binding(
+                get: { model.isMergeMode },
+                set: { model.setMergeMode($0) }
+            ))
+            .keyboardShortcut(KeyEquivalent("\u{F70C}"), modifiers: [])
+            Divider()
             Button("Reload from Disk", action: applicationDelegate.requestReloadComparison)
                 .keyboardShortcut(KeyEquivalent("\u{F708}"), modifiers: .command)
                 .disabled(!model.canReloadFromDisk)
@@ -266,6 +372,14 @@ private struct WinMergeCommands: Commands {
                 .keyboardShortcut(KeyEquivalent("\u{F708}"), modifiers: [])
                 .disabled(!model.canRefresh)
         }
+        CommandGroup(after: .windowArrangement) {
+            Button("Change Pane", action: model.changePane)
+                .keyboardShortcut(KeyEquivalent("\u{F709}"), modifiers: [])
+                .disabled(!model.isReady || model.isWorking)
+            Button("Change Pane Back", action: model.changePane)
+                .keyboardShortcut(KeyEquivalent("\u{F709}"), modifiers: [.shift])
+                .disabled(!model.isReady || model.isWorking)
+        }
         CommandMenu("Tools") {
             Button("Filters...") {}
                 .disabled(true)
@@ -286,30 +400,84 @@ private struct WinMergeCommands: Commands {
 
 private struct ComparisonSettingsView: View {
     let model: ComparisonModel
+    @State private var isImporting = false
+    @State private var isExporting = false
+    @State private var exportDocument: ComparisonOptionsDocument?
+    @State private var errorMessage: String?
 
     var body: some View {
-        Form {
-            Picker("Algorithm", selection: optionBinding(\.algorithm)) {
-                Text("Default").tag(DiffAlgorithm.default)
-                Text("Minimal").tag(DiffAlgorithm.minimal)
-                Text("Patience").tag(DiffAlgorithm.patience)
-                Text("Histogram").tag(DiffAlgorithm.histogram)
-                Text("None").tag(DiffAlgorithm.none)
+        VStack(spacing: 12) {
+            TabView {
+                Form {
+                    Picker("Algorithm", selection: optionBinding(\.algorithm)) {
+                        Text("Default").tag(DiffAlgorithm.default)
+                        Text("Minimal").tag(DiffAlgorithm.minimal)
+                        Text("Patience").tag(DiffAlgorithm.patience)
+                        Text("Histogram").tag(DiffAlgorithm.histogram)
+                        Text("None").tag(DiffAlgorithm.none)
+                    }
+                    Picker("Whitespace", selection: optionBinding(\.whitespace)) {
+                        Text("Compare all").tag(WhitespaceComparison.compareAll)
+                        Text("Ignore changes").tag(WhitespaceComparison.ignoreChanges)
+                        Text("Ignore all").tag(WhitespaceComparison.ignoreAll)
+                    }
+                    Toggle("Ignore case", isOn: optionBinding(\.ignoreCase))
+                    Toggle("Ignore numbers", isOn: optionBinding(\.ignoreNumbers))
+                    Toggle("Ignore blank lines", isOn: optionBinding(\.ignoreBlankLines))
+                    Toggle("Ignore comment differences", isOn: optionBinding(\.ignoreComments))
+                    Toggle("Ignore line ending style", isOn: optionBinding(\.ignoreLineEndings))
+                    Toggle("Indent heuristic", isOn: optionBinding(\.indentHeuristic))
+                }
+                .formStyle(.grouped)
+                .padding(.horizontal, 12)
+                .tabItem { Label("Compare", systemImage: "text.page") }
+
+                FilterSettingsView(model: model)
+                    .id(model.optionsRevision)
+                    .tabItem { Label("Filters", systemImage: "line.3.horizontal.decrease.circle") }
             }
-            Picker("Whitespace", selection: optionBinding(\.whitespace)) {
-                Text("Compare all").tag(WhitespaceComparison.compareAll)
-                Text("Ignore changes").tag(WhitespaceComparison.ignoreChanges)
-                Text("Ignore all").tag(WhitespaceComparison.ignoreAll)
+
+            HStack {
+                Button("Import...") { isImporting = true }
+                Button("Export...") {
+                    exportDocument = ComparisonOptionsDocument(options: model.options)
+                    isExporting = true
+                }
+                Spacer()
+                Button("Reset to Defaults", action: model.resetOptions)
+                    .disabled(model.options == LineDiffOptions())
             }
-            Toggle("Ignore case", isOn: optionBinding(\.ignoreCase))
-            Toggle("Ignore numbers", isOn: optionBinding(\.ignoreNumbers))
-            Toggle("Ignore blank lines", isOn: optionBinding(\.ignoreBlankLines))
-            Toggle("Ignore line ending style", isOn: optionBinding(\.ignoreLineEndings))
-            Toggle("Indent heuristic", isOn: optionBinding(\.indentHeuristic))
         }
-        .formStyle(.grouped)
         .padding(20)
-        .frame(width: 430, height: 390)
+        .frame(width: 680, height: 520)
+        .fileImporter(
+            isPresented: $isImporting,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false,
+            onCompletion: importOptions
+        )
+        .fileExporter(
+            isPresented: $isExporting,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: "MacMerge Comparison Options"
+        ) { result in
+            if case let .failure(error) = result, !isCancellation(error) {
+                errorMessage = "Could not export comparison options. \(error.localizedDescription)"
+            }
+            exportDocument = nil
+        }
+        .alert(
+            "Comparison options",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
     }
 
     private func optionBinding<Value>(
@@ -323,6 +491,186 @@ private struct ComparisonSettingsView: View {
                 model.setOptions(options)
             }
         )
+    }
+
+    private func importOptions(_ result: Result<[URL], Error>) {
+        do {
+            let url = try result.get().first
+            guard let url else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let options = try JSONDecoder().decode(
+                LineDiffOptions.self,
+                from: Data(contentsOf: url)
+            )
+            model.setOptions(options)
+        } catch {
+            guard !isCancellation(error) else { return }
+            errorMessage = "Could not import comparison options. \(error.localizedDescription)"
+        }
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain && error.code == NSUserCancelledError
+    }
+}
+
+private struct FilterSettingsView: View {
+    private struct LineFilterDraft: Identifiable {
+        let id = UUID()
+        var pattern: String
+        var caseSensitive: Bool
+    }
+
+    private struct SubstitutionDraft: Identifiable {
+        let id = UUID()
+        var pattern: String
+        var replacement: String
+        var caseSensitive: Bool
+    }
+
+    let model: ComparisonModel
+    @State private var lineFiltersEnabled: Bool
+    @State private var lineFilters: [LineFilterDraft]
+    @State private var substitutionsEnabled: Bool
+    @State private var substitutions: [SubstitutionDraft]
+    @State private var errorMessage: String?
+
+    init(model: ComparisonModel) {
+        self.model = model
+        _lineFiltersEnabled = State(initialValue: model.options.lineFiltersEnabled)
+        _lineFilters = State(initialValue: model.options.lineFilters.map {
+            LineFilterDraft(pattern: $0.pattern, caseSensitive: $0.caseSensitive)
+        })
+        _substitutionsEnabled = State(initialValue: model.options.substitutionsEnabled)
+        _substitutions = State(initialValue: model.options.substitutions.map {
+            SubstitutionDraft(
+                pattern: $0.pattern,
+                replacement: $0.replacement,
+                caseSensitive: $0.caseSensitive
+            )
+        })
+    }
+
+    var body: some View {
+        Form {
+            Section("Line Filters") {
+                Toggle("Enable line filters", isOn: $lineFiltersEnabled)
+                Text("Matching lines are ignored when differences are evaluated.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach($lineFilters) { $filter in
+                    HStack {
+                        TextField("Regular expression", text: $filter.pattern)
+                            .textFieldStyle(.roundedBorder)
+                        Toggle("Match case", isOn: $filter.caseSensitive)
+                        Button("Remove", systemImage: "minus.circle") {
+                            lineFilters.removeAll { $0.id == filter.id }
+                        }
+                        .labelStyle(.iconOnly)
+                    }
+                }
+                Button("Add Line Filter", systemImage: "plus") {
+                    lineFilters.append(LineFilterDraft(pattern: "", caseSensitive: true))
+                }
+            }
+
+            Section("Substitution Filters") {
+                Toggle("Enable substitutions", isOn: $substitutionsEnabled)
+                Text("Pattern matches are replaced only for comparison; saved files are unchanged.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach($substitutions) { $substitution in
+                    HStack {
+                        TextField("Regular expression", text: $substitution.pattern)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Replacement", text: $substitution.replacement)
+                            .textFieldStyle(.roundedBorder)
+                        Toggle("Match case", isOn: $substitution.caseSensitive)
+                        Button("Remove", systemImage: "minus.circle") {
+                            substitutions.removeAll { $0.id == substitution.id }
+                        }
+                        .labelStyle(.iconOnly)
+                    }
+                }
+                HStack {
+                    Button("Add Substitution", systemImage: "plus") {
+                        substitutions.append(SubstitutionDraft(
+                            pattern: "",
+                            replacement: "",
+                            caseSensitive: true
+                        ))
+                    }
+                    Spacer()
+                    Button("Clear All") {
+                        lineFilters.removeAll()
+                        substitutions.removeAll()
+                    }
+                    .disabled(lineFilters.isEmpty && substitutions.isEmpty)
+                    Button("Apply", action: apply)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding(.horizontal, 12)
+        .alert(
+            "Invalid comparison filter",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func apply() {
+        var options = model.options
+        options.lineFiltersEnabled = lineFiltersEnabled
+        options.lineFilters = lineFilters.map {
+            LineFilterRule(pattern: $0.pattern, caseSensitive: $0.caseSensitive)
+        }
+        options.substitutionsEnabled = substitutionsEnabled
+        options.substitutions = substitutions.map {
+            SubstitutionRule(
+                pattern: $0.pattern,
+                replacement: $0.replacement,
+                caseSensitive: $0.caseSensitive
+            )
+        }
+        do {
+            _ = try LineDiff.compare(left: "", right: "", options: options)
+            model.setOptions(options)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct ComparisonOptionsDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    let options: LineDiffOptions
+
+    init(options: LineDiffOptions) {
+        self.options = options
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        options = try JSONDecoder().decode(LineDiffOptions.self, from: data)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return FileWrapper(regularFileWithContents: try encoder.encode(options))
     }
 }
 
@@ -402,6 +750,10 @@ struct DifferenceLocation: Sendable {
 
 private actor ComparisonWorker {
     func compare(left: String, right: String, options: LineDiffOptions) throws -> ComparisonRenderResult {
+        let signpostID = PerformanceTrace.begin("Comparison")
+        defer { PerformanceTrace.end("Comparison", id: signpostID) }
+        PerformanceProbe.shared.begin("comparison")
+        defer { PerformanceProbe.shared.end("comparison") }
         try Task.checkCancellation()
         return try computeComparison(left: left, right: right, options: options)
     }
@@ -476,6 +828,24 @@ func intralineDifferenceRange(in text: String, comparedWith other: String) -> NS
     return NSRange(textStart ..< textEnd, in: text)
 }
 
+private struct ComparisonOptionsStore {
+    private static let key = "comparisonOptions.v1"
+    let userDefaults: UserDefaults
+
+    func load() -> LineDiffOptions {
+        guard let data = userDefaults.data(forKey: Self.key),
+              let options = try? JSONDecoder().decode(LineDiffOptions.self, from: data) else {
+            return LineDiffOptions()
+        }
+        return options
+    }
+
+    func save(_ options: LineDiffOptions) {
+        guard let data = try? JSONEncoder().encode(options) else { return }
+        userDefaults.set(data, forKey: Self.key)
+    }
+}
+
 @Observable
 @MainActor
 final class ComparisonModel {
@@ -504,14 +874,17 @@ final class ComparisonModel {
     private(set) var currentRowID: DiffRow.ID?
     private(set) var selectedDifferenceRevealRevision = 0
     private(set) var lineDifferenceSelectionRevision = 0
+    private(set) var paneFocusRevision = 0
     private(set) var activeSide = ComparisonSide.left
+    private(set) var isMergeMode: Bool
     private(set) var isWorking = false
     private(set) var comparisonFailed = false
     private(set) var isComparisonCurrent = true
     private(set) var pendingExternalOpenURLs: [URL]?
     private(set) var pendingEncodingSelection: PendingEncodingSelection?
     private(set) var hasPendingSaveWarning = false
-    private(set) var options = LineDiffOptions()
+    private(set) var options: LineDiffOptions
+    private(set) var optionsRevision = 0
     var errorMessage: String?
 
     private var loadedInitialArguments = false
@@ -528,6 +901,16 @@ final class ComparisonModel {
     private var pendingEncodingRetry: (@MainActor (TextFileEncoding) -> Void)?
     private var liveDiffTask: Task<Void, Never>?
     private var lineEditBaselines: [LineEditKey: String] = [:]
+    private let optionsStore: ComparisonOptionsStore?
+    private let userDefaults: UserDefaults?
+
+    init(userDefaults: UserDefaults? = nil) {
+        let optionsStore = userDefaults.map(ComparisonOptionsStore.init(userDefaults:))
+        self.optionsStore = optionsStore
+        self.userDefaults = userDefaults
+        options = optionsStore?.load() ?? LineDiffOptions()
+        isMergeMode = userDefaults?.bool(forKey: "mergeMode") ?? false
+    }
 
     var isReady: Bool {
         left.isLoaded && right.isLoaded
@@ -809,10 +1192,14 @@ final class ComparisonModel {
         leftEncoding: TextFileEncoding? = nil,
         rightEncoding: TextFileEncoding? = nil
     ) {
+        let signpostID = PerformanceTrace.begin("LoadPair")
+        PerformanceProbe.shared.begin("load")
         let leftGeneration = nextLoadGeneration(for: .left)
         let rightGeneration = nextLoadGeneration(for: .right)
         beginOperation()
         Task {
+            defer { PerformanceTrace.end("LoadPair", id: signpostID) }
+            defer { PerformanceProbe.shared.end("load") }
             do {
                 let documents = try await Task.detached {
                     let leftDocument: TextFileDocument
@@ -946,6 +1333,7 @@ final class ComparisonModel {
             preferredDifferenceIndex = nil
         }
         let source = snapshot
+        let comparisonOptions = effectiveComparisonOptions
         beginOperation()
         Task {
             do {
@@ -954,7 +1342,8 @@ final class ComparisonModel {
                         rowID: rowID,
                         direction: direction,
                         left: source.left,
-                        right: source.right
+                        right: source.right,
+                        options: comparisonOptions
                     )
                 }.value
                 guard snapshot == source, let result else {
@@ -974,6 +1363,7 @@ final class ComparisonModel {
         commitActiveEditor()
         guard !isWorking, isComparisonCurrent else { return }
         let source = snapshot
+        let comparisonOptions = effectiveComparisonOptions
         beginOperation()
         Task {
             do {
@@ -981,7 +1371,8 @@ final class ComparisonModel {
                     try LineMerge.applyAll(
                         direction: direction,
                         left: source.left,
-                        right: source.right
+                        right: source.right,
+                        options: comparisonOptions
                     )
                 }.value
                 guard snapshot == source, let result else {
@@ -1040,6 +1431,37 @@ final class ComparisonModel {
         activeSide = side
     }
 
+    func changePane() {
+        guard isReady, !isWorking else { return }
+        activeSide = activeSide == .left ? .right : .left
+        paneFocusRevision &+= 1
+    }
+
+    func setMergeMode(_ enabled: Bool) {
+        guard isMergeMode != enabled else { return }
+        isMergeMode = enabled
+        userDefaults?.set(enabled, forKey: "mergeMode")
+    }
+
+    func handleMergeModeKey(_ keyCode: UInt16, rowID: DiffRow.ID) -> Bool {
+        guard isMergeMode, !isWorking else { return false }
+        switch keyCode {
+        case 123:
+            merge(rowID: rowID, direction: .rightToLeft)
+        case 124:
+            merge(rowID: rowID, direction: .leftToRight)
+        case 125:
+            selectNextDifference()
+            paneFocusRevision &+= 1
+        case 126:
+            selectPreviousDifference()
+            paneFocusRevision &+= 1
+        default:
+            return false
+        }
+        return true
+    }
+
     func selectPreviousDifference() {
         selectAdjacentDifference(offset: -1)
     }
@@ -1082,9 +1504,15 @@ final class ComparisonModel {
     func setOptions(_ options: LineDiffOptions) {
         guard self.options != options else { return }
         self.options = options
+        optionsRevision &+= 1
+        optionsStore?.save(options)
         if isReady {
             scheduleDiff(selectingDifferenceAt: selectedDifferencePosition.map { $0 - 1 })
         }
+    }
+
+    func resetOptions() {
+        setOptions(LineDiffOptions())
     }
 
     func mergeSelectedDifference(direction: MergeDirection, advance: Bool) {
@@ -1130,6 +1558,33 @@ final class ComparisonModel {
         beginOperation()
         Task {
             let saved = await performSave(side, scratchpadDestination: destination)
+            operationCompletions.append { completion?(saved) }
+            endOperation()
+        }
+    }
+
+    func saveAs(
+        _ side: ComparisonSide,
+        destination destinationURL: URL? = nil,
+        completion: (@MainActor (Bool) -> Void)? = nil
+    ) {
+        guard !isWorking, file(on: side).isLoaded else {
+            completion?(false)
+            return
+        }
+        guard let destination = destinationURL ?? saveAsDestination(for: side) else {
+            completion?(false)
+            return
+        }
+        if let oppositeURL = file(on: side == .left ? .right : .left).url,
+           saveDestinationsCollide(destination, oppositeURL) {
+            errorMessage = "Choose a save location different from the other comparison file."
+            completion?(false)
+            return
+        }
+        beginOperation()
+        Task {
+            let saved = await performSaveAs(side, destination: destination)
             operationCompletions.append { completion?(saved) }
             endOperation()
         }
@@ -1233,7 +1688,7 @@ final class ComparisonModel {
         }
 
         let source = snapshot
-        let comparisonOptions = options
+        let comparisonOptions = effectiveComparisonOptions
         beginOperation()
         Task {
             do {
@@ -1279,12 +1734,22 @@ final class ComparisonModel {
         ComparisonSnapshot(left: left.text, right: right.text)
     }
 
+    private var effectiveComparisonOptions: LineDiffOptions {
+        var effective = options
+        guard effective.ignoreComments else { return effective }
+        let fileExtension = [left.url, right.url]
+            .compactMap { $0?.pathExtension }
+            .first { !$0.isEmpty }
+        effective.commentSyntax = fileExtension.flatMap(CommentSyntax.init(fileExtension:))
+        return effective
+    }
+
     private func scheduleLiveDiff() {
         liveDiffTask?.cancel()
         diffGeneration += 1
         let generation = diffGeneration
         let source = snapshot
-        let comparisonOptions = options
+        let comparisonOptions = effectiveComparisonOptions
         liveDiffTask = Task {
             do {
                 try await Task.sleep(for: .milliseconds(120))
@@ -1421,6 +1886,33 @@ final class ComparisonModel {
         }
     }
 
+    private func performSaveAs(_ side: ComparisonSide, destination: URL) async -> Bool {
+        let original = file(on: side)
+        do {
+            let document = try await Task.detached {
+                if let source = original.document {
+                    return try TextFileDocumentIO.saveAs(source, to: destination)
+                }
+                guard let scratchpad = original.scratchpad else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                return try TextFileDocumentIO.create(at: destination, text: scratchpad.text)
+            }.value
+            guard file(on: side) == original else { return false }
+            let canonicalized = !document.text.unicodeScalars.elementsEqual(original.text.unicodeScalars)
+            setFile(ComparedFile(document: document), on: side)
+            if canonicalized {
+                history.reset(to: snapshot)
+                selectedDifferenceID = nil
+                scheduleDiff()
+            }
+            return true
+        } catch {
+            errorMessage = "Could not save \(original.displayName). \(error.localizedDescription)"
+            return false
+        }
+    }
+
     private func file(on side: ComparisonSide) -> ComparedFile {
         side == .left ? left : right
     }
@@ -1457,6 +1949,15 @@ final class ComparisonModel {
         let panel = NSSavePanel()
         panel.title = "Save \(file.displayName)"
         panel.nameFieldStringValue = "\(file.displayName).txt"
+        panel.allowedContentTypes = [.plainText]
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func saveAsDestination(for side: ComparisonSide) -> URL? {
+        let file = file(on: side)
+        let panel = NSSavePanel()
+        panel.title = "Save \(file.displayName) As"
+        panel.nameFieldStringValue = file.isUntitled ? "\(file.displayName).txt" : file.displayName
         panel.allowedContentTypes = [.plainText]
         return panel.runModal() == .OK ? panel.url : nil
     }
@@ -1640,6 +2141,8 @@ private struct ComparisonView: View {
                         selectedDifferenceID: model.selectedDifferenceID,
                         selectedDifferenceRevealRevision: model.selectedDifferenceRevealRevision,
                         lineDifferenceSelectionRevision: model.lineDifferenceSelectionRevision,
+                        paneFocusRevision: model.paneFocusRevision,
+                        paneFocusRowID: model.currentRowID,
                         activeSide: model.activeSide,
                         leftEditable: model.left.isLoaded,
                         rightEditable: model.right.isLoaded,
@@ -1666,7 +2169,8 @@ private struct ComparisonView: View {
                             redo: model.redo,
                             fileURL: { side in
                                 side == .left ? model.left.url : model.right.url
-                            }
+                            },
+                            handleMergeModeKey: model.handleMergeModeKey
                         )
                     )
                 }
@@ -2084,10 +2588,15 @@ private struct ComparisonToolbar: View {
                     .disabled(!model.left.isDirty)
                 Button("Save Right", action: { model.save(.right) })
                     .disabled(!model.right.isDirty)
+                Divider()
+                Button("Save Left As...", action: { model.saveAs(.left) })
+                    .disabled(!model.left.isLoaded)
+                Button("Save Right As...", action: { model.saveAs(.right) })
+                    .disabled(!model.right.isLoaded)
             } primaryAction: {
                 model.saveAllChanges { _ in }
             }
-            .disabled(!model.hasUnsavedChanges || model.isWorking)
+            .disabled(model.isWorking || (!model.left.isLoaded && !model.right.isLoaded))
             .help("Save changed files (Command-S)")
 
             toolbarDivider
@@ -2244,6 +2753,10 @@ private struct ComparisonStatusBar: View {
             Text(statusText)
             Spacer()
             if model.isReady {
+                if model.isMergeMode {
+                    Text("Merge Mode")
+                    Divider().frame(height: 12)
+                }
                 Text("Differences: \(model.summary.differences)")
                 Divider().frame(height: 12)
                 Text("Left: \(model.left.displayName)")
@@ -2277,6 +2790,7 @@ private struct DiffContextMenuActions {
     let canRedo: () -> Bool
     let redo: () -> Void
     let fileURL: (ComparisonSide) -> URL?
+    let handleMergeModeKey: (UInt16, DiffRow.ID) -> Bool
 }
 
 private struct DiffCanvas: View {
@@ -2287,6 +2801,8 @@ private struct DiffCanvas: View {
     let selectedDifferenceID: DiffRow.ID?
     let selectedDifferenceRevealRevision: Int
     let lineDifferenceSelectionRevision: Int
+    let paneFocusRevision: Int
+    let paneFocusRowID: DiffRow.ID?
     let activeSide: ComparisonSide
     let leftEditable: Bool
     let rightEditable: Bool
@@ -2307,6 +2823,8 @@ private struct DiffCanvas: View {
             selectedDifferenceID: selectedDifferenceID,
             selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
             lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
+            paneFocusRevision: paneFocusRevision,
+            paneFocusRowID: paneFocusRowID,
             activeSide: activeSide,
             leftEditable: leftEditable,
             rightEditable: rightEditable,
@@ -2330,6 +2848,8 @@ private struct DiffTableView: NSViewRepresentable {
     let selectedDifferenceID: DiffRow.ID?
     let selectedDifferenceRevealRevision: Int
     let lineDifferenceSelectionRevision: Int
+    let paneFocusRevision: Int
+    let paneFocusRowID: DiffRow.ID?
     let activeSide: ComparisonSide
     let leftEditable: Bool
     let rightEditable: Bool
@@ -2343,13 +2863,15 @@ private struct DiffTableView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
-            rows: displayedRows,
+            rows: rows,
             rowsRevision: rowsRevision,
             differenceLocations: differenceLocations,
             selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
             lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
+            paneFocusRevision: paneFocusRevision,
             leftEditable: leftEditable,
             rightEditable: rightEditable,
+            appendsEditableRow: leftEditable || rightEditable,
             selectDifference: selectDifference,
             activateSide: activateSide,
             editLeft: editLeft,
@@ -2409,15 +2931,18 @@ private struct DiffTableView: NSViewRepresentable {
             || context.coordinator.rightEditable != rightEditable
         context.coordinator.leftEditable = leftEditable
         context.coordinator.rightEditable = rightEditable
+        context.coordinator.appendsEditableRow = leftEditable || rightEditable
 
         if context.coordinator.rowsRevision != rowsRevision || editabilityChanged {
             context.coordinator.setRows(
-                displayedRows,
+                rows,
                 revision: rowsRevision,
                 differenceLocations: differenceLocations
             )
+            context.coordinator.beginFirstVisibleRowTrace()
             tableView.reloadData()
             context.coordinator.restorePendingEditorFocus()
+            context.coordinator.finishFirstVisibleRowTraceAfterLayout()
         }
         container.maximumTextWidth = CGFloat(maximumLineColumns) * 7.25 + 12
 
@@ -2426,9 +2951,11 @@ private struct DiffTableView: NSViewRepresentable {
             != selectedDifferenceRevealRevision
         let lineSelectionRequested = context.coordinator.lineDifferenceSelectionRevision
             != lineDifferenceSelectionRevision
+        let paneFocusRequested = context.coordinator.paneFocusRevision != paneFocusRevision
         context.coordinator.selectedDifferenceID = selectedDifferenceID
         context.coordinator.selectedDifferenceRevealRevision = selectedDifferenceRevealRevision
         context.coordinator.lineDifferenceSelectionRevision = lineDifferenceSelectionRevision
+        context.coordinator.paneFocusRevision = paneFocusRevision
         context.coordinator.synchronizeTableSelection()
         context.coordinator.refreshVisibleRows(for: [oldSelection, selectedDifferenceID].compactMap { $0 })
         if oldSelection != selectedDifferenceID || revealRequested,
@@ -2450,28 +2977,24 @@ private struct DiffTableView: NSViewRepresentable {
                 cell.selectDifferenceRange(on: activeSide)
             }
         }
-    }
-
-    private var displayedRows: [DiffRow] {
-        guard leftEditable || rightEditable else { return rows }
-        return rows + [DiffRow(
-            id: DiffRow.ID(leftNumber: nil, rightNumber: nil),
-            left: nil,
-            right: nil,
-            kind: .unchanged
-        )]
+        if paneFocusRequested {
+            context.coordinator.focusEditor(on: activeSide, rowID: paneFocusRowID)
+        }
     }
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        private static let editableRow = DiffRow(left: nil, right: nil, kind: .unchanged)
         var rows: [DiffRow]
         var rowsRevision: Int
         var differenceLocations: [DiffRow.ID: DifferenceLocation]
         var selectedDifferenceID: DiffRow.ID?
         var selectedDifferenceRevealRevision: Int
         var lineDifferenceSelectionRevision: Int
+        var paneFocusRevision: Int
         var leftEditable: Bool
         var rightEditable: Bool
+        var appendsEditableRow: Bool
         var selectDifference: (DiffRow.ID?) -> Void
         var activateSide: (ComparisonSide) -> Void
         var editLeft: (DiffRow.ID, String) -> Void
@@ -2483,6 +3006,8 @@ private struct DiffTableView: NSViewRepresentable {
         weak var container: DiffTableContainerView?
         private var isSynchronizingSelection = false
         private var pendingEditorFocus: PendingEditorFocus?
+        private var firstVisibleRowSignpostID: OSSignpostID?
+        private var didAutoScroll = false
 
         private struct PendingEditorFocus {
             let side: ComparisonSide
@@ -2495,8 +3020,10 @@ private struct DiffTableView: NSViewRepresentable {
             differenceLocations: [DiffRow.ID: DifferenceLocation],
             selectedDifferenceRevealRevision: Int,
             lineDifferenceSelectionRevision: Int,
+            paneFocusRevision: Int,
             leftEditable: Bool,
             rightEditable: Bool,
+            appendsEditableRow: Bool,
             selectDifference: @escaping (DiffRow.ID?) -> Void,
             activateSide: @escaping (ComparisonSide) -> Void,
             editLeft: @escaping (DiffRow.ID, String) -> Void,
@@ -2510,8 +3037,10 @@ private struct DiffTableView: NSViewRepresentable {
             self.differenceLocations = differenceLocations
             self.selectedDifferenceRevealRevision = selectedDifferenceRevealRevision
             self.lineDifferenceSelectionRevision = lineDifferenceSelectionRevision
+            self.paneFocusRevision = paneFocusRevision
             self.leftEditable = leftEditable
             self.rightEditable = rightEditable
+            self.appendsEditableRow = appendsEditableRow
             self.selectDifference = selectDifference
             self.activateSide = activateSide
             self.editLeft = editLeft
@@ -2523,21 +3052,21 @@ private struct DiffTableView: NSViewRepresentable {
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
-            rows.count
+            rows.count + (appendsEditableRow ? 1 : 0)
         }
 
         func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-            rows.indices.contains(row) && rows[row].kind != .unchanged
+            displayedRow(at: row)?.kind != .unchanged
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !isSynchronizingSelection, let tableView else { return }
-            guard rows.indices.contains(tableView.selectedRow) else {
+            guard let row = displayedRow(at: tableView.selectedRow) else {
                 selectDifference(nil)
                 return
             }
-            guard rows[tableView.selectedRow].kind != .unchanged else { return }
-            selectDifference(rows[tableView.selectedRow].id)
+            guard row.kind != .unchanged else { return }
+            selectDifference(row.id)
         }
 
         func tableView(
@@ -2545,13 +3074,13 @@ private struct DiffTableView: NSViewRepresentable {
             viewFor tableColumn: NSTableColumn?,
             row: Int
         ) -> NSView? {
-            guard rows.indices.contains(row) else { return nil }
+            guard let displayedRow = displayedRow(at: row) else { return nil }
             let cell = tableView.makeView(withIdentifier: .diffCell, owner: self) as? DiffTableCellView
                 ?? DiffTableCellView()
             cell.identifier = .diffCell
             cell.configure(
-                row: rows[row],
-                selected: rows[row].id == selectedDifferenceID,
+                row: displayedRow,
+                selected: displayedRow.id == selectedDifferenceID,
                 leftEditable: leftEditable,
                 rightEditable: rightEditable,
                 horizontalOffset: container?.horizontalOffset ?? 0,
@@ -2561,12 +3090,12 @@ private struct DiffTableView: NSViewRepresentable {
                 finishEditingLeft: finishEditingLeft,
                 finishEditingRight: finishEditingRight,
                 contextMenuActions: contextMenuActions,
-                activateLeft: { [weak self] in
-                    self?.selectDifference(self?.rows[row].id)
+                activateLeft: { [weak self, id = displayedRow.id] in
+                    self?.selectDifference(id)
                     self?.activateSide(.left)
                 },
-                activateRight: { [weak self] in
-                    self?.selectDifference(self?.rows[row].id)
+                activateRight: { [weak self, id = displayedRow.id] in
+                    self?.selectDifference(id)
                     self?.activateSide(.right)
                 },
                 continueEditingLeft: { [weak self] lineOffset in
@@ -2577,6 +3106,41 @@ private struct DiffTableView: NSViewRepresentable {
                 }
             )
             return cell
+        }
+
+        func beginFirstVisibleRowTrace() {
+            if let id = firstVisibleRowSignpostID {
+                PerformanceTrace.end("FirstVisibleRow", id: id)
+            }
+            guard !rows.isEmpty else {
+                firstVisibleRowSignpostID = nil
+                return
+            }
+            firstVisibleRowSignpostID = PerformanceTrace.begin("FirstVisibleRow")
+            PerformanceProbe.shared.beginFirstRender(
+                rowCount: rows.count + (appendsEditableRow ? 1 : 0)
+            )
+        }
+
+        func finishFirstVisibleRowTraceAfterLayout() {
+            guard firstVisibleRowSignpostID != nil, let tableView else { return }
+            DispatchQueue.main.async { [weak self, weak tableView] in
+                guard let self, let tableView, tableView.numberOfRows > 0 else { return }
+                tableView.layoutSubtreeIfNeeded()
+                guard tableView.view(atColumn: 0, row: 0, makeIfNecessary: true) != nil,
+                      let id = self.firstVisibleRowSignpostID else { return }
+                PerformanceTrace.end("FirstVisibleRow", id: id)
+                self.firstVisibleRowSignpostID = nil
+                PerformanceProbe.shared.end("first_render")
+                guard PerformanceProbe.shared.shouldAutoScroll, !self.didAutoScroll else { return }
+                self.didAutoScroll = true
+                PerformanceProbe.shared.begin("scroll")
+                tableView.scrollRowToVisible(tableView.numberOfRows - 1)
+                tableView.layoutSubtreeIfNeeded()
+                DispatchQueue.main.async {
+                    PerformanceProbe.shared.finishScroll()
+                }
+            }
         }
 
         func setRows(
@@ -2643,9 +3207,9 @@ private struct DiffTableView: NSViewRepresentable {
         }
 
         private func continueEditing(fromRow rowIndex: Int, side: ComparisonSide, lineOffset: Int) {
-            guard rows.indices.contains(rowIndex) else { return }
-            let currentLine = side == .left ? rows[rowIndex].left?.number : rows[rowIndex].right?.number
-            let insertionLine = rows[..<rowIndex].reduce(into: 1) { number, row in
+            guard let row = displayedRow(at: rowIndex) else { return }
+            let currentLine = side == .left ? row.left?.number : row.right?.number
+            let insertionLine = rows[..<min(rowIndex, rows.count)].reduce(into: 1) { number, row in
                 if side == .left ? row.left != nil : row.right != nil {
                     number += 1
                 }
@@ -2672,20 +3236,51 @@ private struct DiffTableView: NSViewRepresentable {
             }
         }
 
+        func focusEditor(on side: ComparisonSide, rowID: DiffRow.ID?) {
+            guard let tableView else { return }
+            let rowIndex = rowID.flatMap { id in rows.firstIndex(where: { $0.id == id }) }
+                ?? max(0, tableView.row(at: tableView.visibleRect.origin))
+            guard rows.indices.contains(rowIndex) else { return }
+            tableView.scrollRowToVisible(rowIndex)
+            DispatchQueue.main.async { [weak tableView] in
+                guard let tableView,
+                      let cell = tableView.view(atColumn: 0, row: rowIndex, makeIfNecessary: true)
+                        as? DiffTableCellView else { return }
+                _ = cell.focusEditor(on: side)
+            }
+        }
+
+        private func displayedRow(at index: Int) -> DiffRow? {
+            if rows.indices.contains(index) { return rows[index] }
+            if appendsEditableRow && index == rows.count { return Self.editableRow }
+            return nil
+        }
+
     }
 }
 
 @MainActor
 private final class DiffVerticalScrollView: NSScrollView {
     var horizontalScrollHandler: ((CGFloat) -> Void)?
+    private var scrollSignpostID: OSSignpostID?
 
     override func scrollWheel(with event: NSEvent) {
+        if scrollSignpostID == nil {
+            scrollSignpostID = PerformanceTrace.begin("ScrollGesture")
+        }
         if event.scrollingDeltaX != 0 {
             let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 24
             horizontalScrollHandler?(-event.scrollingDeltaX * scale)
         }
         if event.scrollingDeltaY != 0 || event.scrollingDeltaX == 0 {
             super.scrollWheel(with: event)
+        }
+        let isDiscrete = event.phase.isEmpty && event.momentumPhase.isEmpty
+        let didEnd = event.phase.contains(.ended) || event.phase.contains(.cancelled)
+            || event.momentumPhase.contains(.ended)
+        if isDiscrete || didEnd, let id = scrollSignpostID {
+            PerformanceTrace.end("ScrollGesture", id: id)
+            scrollSignpostID = nil
         }
     }
 }
@@ -3057,9 +3652,19 @@ private final class LockedLineClipView: NSClipView {
 @MainActor
 private final class DiffContextTextView: NSTextView {
     var contextMenuProvider: (() -> NSMenu?)?
+    var mergeModeKeyHandler: ((NSEvent) -> Bool)?
 
     override func menu(for event: NSEvent) -> NSMenu? {
         contextMenuProvider?() ?? super.menu(for: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let hasModifier = !event.modifierFlags
+            .intersection([.shift, .control, .command, .option])
+            .isEmpty
+        if hasModifier || mergeModeKeyHandler?(event) != true {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -3155,6 +3760,10 @@ private final class DiffLineTextView: NSView, NSTextViewDelegate, NSMenuDelegate
             guard let self, let menu else { return nil }
             self.menuNeedsUpdate(menu)
             return menu
+        }
+        textView.mergeModeKeyHandler = { [weak self] event in
+            guard let self, let row = contextMenuRow else { return false }
+            return contextMenuActions?.handleMergeModeKey(event.keyCode, row.id) == true
         }
         addSubview(scrollView)
     }

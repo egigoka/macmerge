@@ -336,6 +336,52 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertEqual(model.lineDifferenceSelectionRevision, selectionRevision + 1)
     }
 
+    func testChangePaneTogglesSideAndRequestsFocus() {
+        let model = ComparisonModel()
+        model.createEmptyComparison()
+        let revision = model.paneFocusRevision
+
+        model.changePane()
+
+        XCTAssertEqual(model.activeSide, .right)
+        XCTAssertEqual(model.paneFocusRevision, revision + 1)
+        model.changePane()
+        XCTAssertEqual(model.activeSide, .left)
+        XCTAssertEqual(model.paneFocusRevision, revision + 2)
+    }
+
+    func testMergeModePersistsAndMapsNavigationArrows() async throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let leftURL = try temporaryFile(name: "left.txt", content: "one\nsame\ntwo\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "ONE\nsame\nTWO\n")
+        let model = ComparisonModel(userDefaults: userDefaults)
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        let first = try XCTUnwrap(model.rows.first(where: { $0.kind != .unchanged })?.id)
+        model.selectDifference(first)
+
+        model.setMergeMode(true)
+        let handled = model.handleMergeModeKey(125, rowID: first)
+
+        XCTAssertTrue(handled)
+        XCTAssertNotEqual(model.selectedDifferenceID, first)
+        XCTAssertTrue(ComparisonModel(userDefaults: userDefaults).isMergeMode)
+        model.setMergeMode(false)
+    }
+
+    func testMergeModeIgnoresUnmappedKeys() {
+        let model = ComparisonModel()
+        model.createEmptyComparison()
+        model.setMergeMode(true)
+
+        XCTAssertFalse(model.handleMergeModeKey(
+            0,
+            rowID: DiffRow.ID(leftNumber: nil, rightNumber: nil)
+        ))
+    }
+
     func testRefreshRecomparesMemoryWithoutReadingChangedDiskFile() async throws {
         let leftURL = try temporaryFile(name: "left.txt", content: "one\n")
         let rightURL = try temporaryFile(name: "right.txt", content: "two\n")
@@ -370,6 +416,109 @@ final class ComparisonModelTests: XCTestCase {
         await waitUntilIdle(model)
 
         XCTAssertEqual(model.summary.differences, 0)
+    }
+
+    func testIgnoreCommentsUsesLoadedFileExtension() async throws {
+        let leftURL = try temporaryFile(name: "left.cpp", content: "value(); // left\n")
+        let rightURL = try temporaryFile(name: "right.cpp", content: "value(); // right\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        XCTAssertEqual(model.summary.differences, 1)
+        var options = model.options
+        options.ignoreComments = true
+
+        model.setOptions(options)
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.summary.differences, 0)
+    }
+
+    func testIgnoreCommentsUsesLoadedSQLFileExtension() async throws {
+        let leftURL = try temporaryFile(name: "left.sql", content: "SELECT 1; -- left\n")
+        let rightURL = try temporaryFile(name: "right.sql", content: "SELECT 1; -- right\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        XCTAssertEqual(model.summary.differences, 1)
+        var options = model.options
+        options.ignoreComments = true
+
+        model.setOptions(options)
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.summary.differences, 0)
+    }
+
+    func testComparisonOptionsPersistAcrossModels() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let model = ComparisonModel(userDefaults: userDefaults)
+        let options = LineDiffOptions(
+            algorithm: .histogram,
+            whitespace: .ignoreChanges,
+            ignoreCase: true,
+            ignoreNumbers: true,
+            ignoreBlankLines: true,
+            ignoreComments: true,
+            ignoreLineEndings: false,
+            indentHeuristic: true,
+            lineFiltersEnabled: false,
+            lineFilters: [LineFilterRule(pattern: "^generated:", caseSensitive: false)],
+            substitutionsEnabled: false,
+            substitutions: [
+                SubstitutionRule(pattern: "version \\d+", replacement: "version", caseSensitive: false)
+            ]
+        )
+
+        model.setOptions(options)
+
+        XCTAssertEqual(ComparisonModel(userDefaults: userDefaults).options, options)
+    }
+
+    func testMalformedPersistedComparisonOptionsUseDefaults() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        userDefaults.set(Data("not json".utf8), forKey: "comparisonOptions.v1")
+
+        XCTAssertEqual(ComparisonModel(userDefaults: userDefaults).options, LineDiffOptions())
+    }
+
+    func testLegacyComparisonOptionsDefaultFilterEnableFlags() throws {
+        let json = """
+        {
+          "algorithm": "default",
+          "whitespace": "compareAll",
+          "ignoreCase": false,
+          "ignoreNumbers": false,
+          "ignoreBlankLines": false,
+          "ignoreLineEndings": true,
+          "indentHeuristic": false,
+          "lineFilters": [{"pattern": "^# ", "caseSensitive": true}],
+          "substitutions": [{"pattern": "\\\\d+", "replacement": "", "caseSensitive": true}]
+        }
+        """
+
+        let options = try JSONDecoder().decode(LineDiffOptions.self, from: Data(json.utf8))
+
+        XCTAssertTrue(options.lineFiltersEnabled)
+        XCTAssertTrue(options.substitutionsEnabled)
+        XCTAssertFalse(options.ignoreComments)
+    }
+
+    func testResetComparisonOptionsPersistsDefaults() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let model = ComparisonModel(userDefaults: userDefaults)
+        model.setOptions(LineDiffOptions(algorithm: .patience, ignoreCase: true))
+
+        model.resetOptions()
+
+        XCTAssertEqual(model.options, LineDiffOptions())
+        XCTAssertEqual(ComparisonModel(userDefaults: userDefaults).options, LineDiffOptions())
     }
 
     func testSaveAllCompletionCanAcceptPendingExternalOpen() async throws {
@@ -556,6 +705,49 @@ final class ComparisonModelTests: XCTestCase {
         await waitUntilIdle(model)
         XCTAssertEqual(model.left.text, "")
         XCTAssertTrue(model.left.isDirty)
+    }
+
+    func testDocumentSaveAsChangesIdentityAndPreservesUndoHistory() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "left\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "right\n")
+        let destination = leftURL.deletingLastPathComponent().appending(path: "left-copy.txt")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        let rowID = try XCTUnwrap(model.rows.first(where: { $0.kind != .unchanged })?.id)
+        model.merge(rowID: rowID, direction: .rightToLeft)
+        await waitUntilIdle(model)
+
+        let saved = await withCheckedContinuation { continuation in
+            model.saveAs(.left, destination: destination) {
+                continuation.resume(returning: $0)
+            }
+        }
+        await waitUntilIdle(model)
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(model.left.url, destination)
+        XCTAssertEqual(try String(contentsOf: leftURL, encoding: .utf8), "left\n")
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "right\n")
+        XCTAssertTrue(model.canUndo)
+    }
+
+    func testDocumentSaveAsRejectsOtherPaneDestination() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "left\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "right\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+
+        let saved = await withCheckedContinuation { continuation in
+            model.saveAs(.left, destination: rightURL) {
+                continuation.resume(returning: $0)
+            }
+        }
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(model.left.url, leftURL)
+        XCTAssertEqual(try String(contentsOf: rightURL, encoding: .utf8), "right\n")
     }
 
     func testDiscardAndReloadRecoversDirtyFileChangedOnDisk() async throws {

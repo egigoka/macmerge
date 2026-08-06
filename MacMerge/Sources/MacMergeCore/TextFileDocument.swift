@@ -271,6 +271,58 @@ public enum TextFileDocumentIO {
         }
     }
 
+    public static func saveAs(_ document: TextFileDocument, to url: URL) throws -> TextFileDocument {
+        try withSecurityScopedAccess(to: url) {
+            if document.isDirty, document.encoding.isLegacy {
+                let canonicalPersistedData = try TextFileCodec.encode(DecodedTextFile(
+                    text: document.persistedText,
+                    encoding: document.encoding,
+                    hasByteOrderMark: document.hasByteOrderMark
+                ))
+                guard canonicalPersistedData == document.persistedData else {
+                    throw TextFileCodecError.encodingFailed(document.encoding)
+                }
+            }
+            let encodedData = document.isDirty
+                ? try TextFileCodec.encode(DecodedTextFile(
+                    text: document.text,
+                    encoding: document.encoding,
+                    hasByteOrderMark: document.hasByteOrderMark
+                ))
+                : document.persistedData
+            try validateEncodedSize(encodedData.count)
+            let persistedDecoded = try TextFileCodec.decode(encodedData, assuming: document.encoding)
+            let initialStorageURL = url.resolvingSymlinksInPath().standardizedFileURL
+            var coordinationError: NSError?
+            var operationResult: Result<URL, any Error>?
+            NSFileCoordinator().coordinate(
+                writingItemAt: initialStorageURL,
+                options: .forReplacing,
+                error: &coordinationError
+            ) { coordinatedURL in
+                operationResult = Result {
+                    guard url.resolvingSymlinksInPath().standardizedFileURL ==
+                            coordinatedURL.standardizedFileURL else {
+                        throw TextFileDocumentError.changedOnDisk
+                    }
+                    let storageURL = try atomicCreate(encodedData, at: coordinatedURL)
+                    guard try readBoundedData(from: storageURL) == encodedData else {
+                        throw TextFileDocumentError.saveOutcomeUncertain(storageURL.path)
+                    }
+                    return storageURL
+                }
+            }
+            if let coordinationError { throw coordinationError }
+            guard let operationResult else { throw CocoaError(.fileWriteUnknown) }
+            return TextFileDocument(
+                url: url,
+                storageURL: try operationResult.get(),
+                decoded: persistedDecoded,
+                data: encodedData
+            )
+        }
+    }
+
     private static func readBoundedData(from url: URL) throws -> Data {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
         guard values.isRegularFile == true else {

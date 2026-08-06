@@ -35,8 +35,8 @@ Acceptance: user can open two files, apply individual changes in either directio
 - [x] Add whitespace, case, blank-line, line-filter, and substitution options.
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
-- [ ] Detect moved blocks and expose intra-line differences.
-- [-] Handle large files without materializing every rendered row (reusable native table and off-main render metadata complete; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, allocation-free editable sentinel, and direct document-record comparison complete; 1M-row benchmark reduced shallow row storage from 83.9 to 53.4 MiB and resident growth from 537.8 to 376.3 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -58,7 +58,7 @@ Acceptance: user can compare and synchronize realistic directory trees without b
 - [-] Add document windows, recent items, drag and drop, and Finder Open With support (initial and subsequent Open With complete).
 - [-] Add WinMerge-style toolbar command parity; track every command in the audit below.
 - [x] Create editable two-pane untitled text comparisons and save scratchpads with Save As.
-- [-] Add native menus, keyboard shortcuts, toolbar customization, and settings (comparison Settings scene and primary command shortcuts added; complete menus/customization/persistence pending).
+- [-] Add native menus, keyboard shortcuts, toolbar customization, and settings (comparison Settings scene, option persistence, and primary command shortcuts added; complete menus/customization pending).
 - [ ] Add syntax highlighting and configurable colors and fonts.
 - [ ] Restore window layouts and comparison sessions.
 - [ ] Meet VoiceOver, keyboard navigation, contrast, and localization requirements.
@@ -120,13 +120,13 @@ A row is complete only after placement, action wiring, result, enablement, check
 
 ### Main menus and command surfaces
 
-- [PARTIAL] File menu: New Text, pair Open, Save/Save Left/Save Right, Reload, and guarded Quit exist; all remaining `IDR_MERGEDOCTYPE` File commands are mapped in the command audits below.
+- [PARTIAL] File menu: New Text, pair Open, Save/Save Left/Save Right, Save Left/Right As, Merge Mode, Reload, and guarded Quit exist; all remaining `IDR_MERGEDOCTYPE` File commands are mapped in the command audits below.
 - [PARTIAL] Edit menu: native field editing, model undo/redo, Select Line Difference, and Options exist; focus-routed history, previous line-difference selection, search, markers, numbered copy, bookmarks, and go-to are missing.
 - [MISSING] View menu: font, zoom, syntax, diff context, whitespace/EOL/line differences/numbers/margins/wrap, pane swap/split/lock, toolbar choices, and dockable pane visibility.
-- [PARTIAL] Merge menu: two-way navigation and copying exist; cursor/current behavior, conflicts, three-way commands, Auto Merge, selected-line operations, and synchronization points are incomplete.
+- [PARTIAL] Merge menu: two-way cursor-relative navigation and copying exist; conflicts, three-way commands, Auto Merge, selected-line operations, and synchronization points are incomplete.
 - [MISSING] Tools menu: Filters, Generate Patch, Generate Report, and Generate Archive.
 - [MISSING] Plugins menu: settings, prediffers, unpackers, editor/copy scripts, transforms, and reload.
-- [PARTIAL] Window menu: native close/minimize/zoom exists; multiple comparison windows/tabs, pane focus, split, and document arrangement are missing.
+- [PARTIAL] Window menu: native close/minimize/zoom and two-pane Change Pane exist; multiple comparison windows/tabs, split, and document arrangement are missing.
 - [MISSING] Help menu: Help Book, release notes, translations, configuration report, GPL, contributors, and complete About content.
 - [PARTIAL] `IDR_MAINFRAME` toolbar: implemented commands use compact icons; exact command contract remains governed by the Toolbar Command Audit.
 - [MISSING] Toolbar visibility, None/Small/Medium/Big/Huge sizes, native overflow, customization, reset, and persistence.
@@ -142,7 +142,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [MISSING] Output Pane: message log plus Copy, Select All, Clear All, visibility, and persistence.
 - [MISSING] `IDD_DISPLAY_FILTER_BAR`: expression, history/presets, apply/close, text/folder variants, and restoration.
 - [PARTIAL] `IDD_ENCODINGERROR`: explicit encoding selection and safe failures exist as dialogs; recovery bar, unpacker, and hex alternatives are missing.
-- [PARTIAL] Global status: processing/result, difference count, and filenames exist; plugin, merge mode, current difference, and command prompts are missing.
+- [PARTIAL] Global status: processing/result, Merge Mode, difference count, and filenames exist; plugin state, current difference, and command prompts are missing.
 - [MISSING] Per-pane text/table status: line, column, character, selection, encoding, BOM, EOL, and read-only state with click actions.
 - [MISSING] Folder, hex, image, and web mode-specific status surfaces.
 
@@ -154,13 +154,13 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [MISSING] `IDD_EDIT_FIND`, `IDD_EDIT_REPLACE`, `IDD_EDIT_MARKER`, and `IDD_WMGOTO`.
 - [MISSING] `IDD_DIRCOLS`, `IDD_DIRADDITIONALPROPS`, `IDD_DIRCOMP_PROGRESS`, `IDD_CONFIRM_COPY`, `IDD_SELECT_FILES_OR_FOLDERS`, `IDD_COMPARE_STATISTICS`, and `IDD_COMPARE_STATISTICS3`.
 - [MISSING] `IDD_GENERATE_PATCH`, `IDD_DIRCMP_REPORT`, `IDD_FILECMP_REPORT`, and `IDD_ARCHIVE`.
-- [MISSING] `IDD_FILTERS_LINEFILTERS`, `IDD_FILTERS_SUBSTITUTIONFILTERS`, `IDD_FILTERS_FILEFILTERS`, `IDD_FILTERS_CONDITION`, `IDD_COMPARISON_RESULT_FILTER`, `IDD_FILTERS_MATCHINSIDE`, shared/private filter, and test-filter dialogs.
+- [PARTIAL] `IDD_FILTERS_LINEFILTERS` and `IDD_FILTERS_SUBSTITUTIONFILTERS`: Settings supports enable state, ordered regex rules, case sensitivity, replacements, remove/clear, validation, persistence, and recomparison; file/condition/result/match-inside/shared/private/test-filter dialogs remain missing.
 - [MISSING] `IDD_PLUGINS_SELECTPLUGIN`, `IDD_PLUGINS_LIST`, and `IDD_PLUGINS_EDITPLUGIN`.
 - [MISSING] `IDD_DIALOG_WINDOWSMANAGER`, `IDD_INPUTBOX`, reusable translated message-box behavior, and dark font/color chooser adaptations.
 
 ### Preferences and settings
 
-- [PARTIAL] `IDD_PREFERENCES`: native comparison Settings scene drives recomparison; category navigation, Import, Export, Reset, Help, validation, and persistence are missing.
+- [PARTIAL] `IDD_PREFERENCES`: native categorized Settings drives recomparison and supports persisted JSON Import, Export, and Reset for every current text option; Help and broader WinMerge pages are missing.
 - [MISSING] General, System, Message Boxes, Project, Archive, Backup, Codepage, and Shell/Jump List pages.
 - [MISSING] Compare Text, Folder, Table, Binary, Image, and Webpage pages.
 - [MISSING] Editor General, Compare/Merge, and Syntax pages.
@@ -180,24 +180,24 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [MISSING] File and folder comparison reports with formats, clipboard output, linked file reports, and open-after-generation.
 - [MISSING] Patch Generator with file selection, style/context, append, clipboard, command line, and external editor.
 - [MISSING] Archive Generator with report/patch/project inclusion and file/clipboard output.
-- [MISSING] Filters property sheet, file/line/substitution editors, condition builders, comparison-result filters, and expression helper menus.
+- [PARTIAL] Filter settings include line/substitution editors; file filters, condition builders, comparison-result filters, expression helpers, and dedicated test dialogs remain missing.
 - [MISSING] Plugin manager/editor/selector, unpacker/prediffer selection, automatic/manual modes, editor/copy scripts, macros, settings, and reload.
 - [UNKNOWN] Plugin architecture adaptation: define a sandboxed, permission-aware extension model or document intentional unsupported scope before implementation.
 
 ### Navigation, merge, and pane controls
 
-- [PARTIAL] First/Current/Previous/Next/Last Difference: first/previous/next/last exist; Current and cursor-relative rules are in progress.
+- [PARTIAL] First/Current/Previous/Next/Last Difference and cursor-relative fallback exist; offscreen-selection behavior still needs parity verification.
 - [MISSING] Next/Previous Conflict and all three-way pair-specific or side-only navigation.
-- [PARTIAL] Copy Left/Right, Copy-and-Advance, and Copy All exist; cursor fallback, multi-difference selection, selected-line copy, read-only targets, and Auto Merge are incomplete.
+- [PARTIAL] Copy Left/Right, Copy-and-Advance, Copy All, and current-line fallback exist; multi-difference selection, selected-line copy, read-only targets, and Auto Merge are incomplete.
 - [MISSING] First/Previous/Next/Last compared-file navigation from folder results.
-- [MISSING] Add/Clear Synchronization Point, bookmarks, go-to definition, moved-line navigation, pane swap, pane lock, pane focus, and dynamic split controls.
+- [PARTIAL] Change Pane cycles two-pane editor focus with `F6`/`Shift-F6` while preserving logical row; synchronization points, bookmarks, go-to definition, moved-line navigation, pane swap/lock, and dynamic split controls remain missing.
 
 ### Accessibility, persistence, and test completion
 
 - [PARTIAL] Existing file controls, toolbar controls, summary, rows, editors, and selected state expose basic AX metadata.
 - [ ] Add unique role, label, value, hint, enabled/check/selection state, focus order, actions, and announcements to every control and dynamic result.
 - [ ] Verify Full Keyboard Access, VoiceOver activation, increased contrast, differentiate-without-color, dark mode, and localization expansion.
-- [MISSING] Persist preferences, window frames/tabs, panes, toolbar, recents, bookmarks, comparison sessions, and sandbox access.
+- [PARTIAL] Current text comparison preferences persist; window frames/tabs, panes, toolbar, recents, bookmarks, comparison sessions, and sandbox access remain missing.
 - [PARTIAL] Model/core tests cover current text operations; command-contract, menu, toolbar, dialog, AX, persistence, screenshot, and installed-app smoke suites are incomplete.
 - [ ] Every completed ledger row must cite model/unit, UI interaction, semantic AX, persistence if stateful, and packaged-app smoke evidence.
 
@@ -242,8 +242,8 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [x] `ID_FILE_SAVE_LEFT`: save only the left side.
 - [x] `ID_FILE_SAVE_RIGHT`: save only the right side.
 - [ ] `ID_FILE_SAVE_MIDDLE`: save the middle side when three-pane comparison exists.
-- [-] `ID_FILE_SAVEAS_LEFT`: Save As works for an untitled left side; add document-backed Save As.
-- [-] `ID_FILE_SAVEAS_RIGHT`: Save As works for an untitled right side; add document-backed Save As.
+- [x] `ID_FILE_SAVEAS_LEFT`: Save As supports untitled and document-backed left panes while preserving encoding, BOM, exact clean bytes, source contents, and merge history.
+- [x] `ID_FILE_SAVEAS_RIGHT`: Save As supports untitled and document-backed right panes with opposite-pane collision rejection.
 - [ ] `ID_FILE_SAVEAS_MIDDLE`: Save As for a middle side.
 - [x] Reject save destinations that alias another pane, including Save All collisions.
 - [x] Preserve merge history when Save As changes identity but not text.
@@ -290,7 +290,7 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] `ID_PREVFILE`: open the previous file pair from directory comparison results.
 - [ ] `ID_NEXTFILE`: open the next file pair from directory comparison results.
 - [ ] `ID_LASTFILE`: open the last file pair from directory comparison results.
-- [-] `ID_OPTIONS`: native comparison settings open from toolbar/menu and drive real recomparison; filters/substitutions and persistence pending.
+- [x] `ID_OPTIONS`: native categorized comparison settings open from toolbar/menu, drive real recomparison, persist all current options, edit line/substitution filters, and support JSON Import/Export plus Reset.
 - [x] `ID_REFRESH`: recompare current in-memory buffers without disk I/O; disk Reload remains a separate guarded command.
 - [x] Preserve left/right side identity when reloading a mixed scratchpad/file comparison.
 
@@ -318,12 +318,12 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] New (3 panes) submenu: Text, Table, Binary, Image, Webpage, Folder.
 - [ ] Open, Open Conflict File, and Open Clipboard.
 - [ ] Open Project and Save Project.
-- [ ] Save; Save Left/Middle/Right; Save Left/Middle/Right As.
+- [-] Save, Save Left/Right, and Save Left/Right As exist; middle-pane variants await three-way comparison.
 - [ ] Print, Page Setup, and Print Preview using native macOS printing.
 - [ ] Left/Middle/Right Read-Only state.
 - [ ] Convert Line Endings to CRLF, LF, or CR without changing unrelated terminators unexpectedly.
-- [ ] Merge Mode state and `F9` behavior.
-- [ ] Reload/Rescan and File Encoding selection.
+- [x] Merge Mode persists, exposes checked `F9` state and status, and maps unmodified arrows to merge/navigation while modified arrows retain editor behavior.
+- [-] Guarded Reload from Disk and ambiguity-driven encoding selection exist; explicit File Encoding menu selection and broader rescan behavior remain missing.
 - [ ] Recompare As Text, Table, Binary, Image, Webpage, or Archive.
 - [ ] Recent Files or Folders using native recent-document integration.
 - [x] Exit/Quit warns about unsaved work and save recovery notices.
@@ -332,7 +332,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 
 - [ ] Wire Undo and Redo to the correct focused editor or comparison history.
 - [ ] Cut, Copy, Paste, and Select All for scratchpads and selectable diff text.
-- [ ] Select Line Difference and Select Previous Line Difference.
+- [-] Select Line Difference exists; Select Previous Line Difference remains missing.
 - [ ] Find, Replace, Marker, and Repeat Search.
 - [ ] Copy With Line Numbers.
 - [ ] Toggle, Next, Previous, and Clear All Bookmarks.
@@ -352,11 +352,11 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 
 ### Merge menu
 
-- [ ] Next, Previous, First, Current, and Last Difference.
+- [x] Next, Previous, First, Current, and Last Difference.
 - [ ] Next and Previous Conflict.
 - [ ] Three-way advanced difference navigation for each pane pair and one-sided difference type.
-- [ ] Directional copy, copy-from, selected-lines copy, and copy-and-advance commands.
-- [ ] Copy All Left and Copy All Right.
+- [-] Directional copy and copy-and-advance exist; dedicated copy-from aliases and selected-lines copy remain missing.
+- [x] Copy All Left and Copy All Right.
 - [ ] Auto Merge.
 - [ ] Add and clear synchronization points.
 - [ ] Ensure menu and toolbar invoke one shared command implementation and one shared enabled-state implementation.
@@ -365,7 +365,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 
 - [ ] Filters, Generate Patch, Generate Report, and Generate Archive.
 - [ ] Define macOS replacement or explicit unsupported status for unpackers, prediffers, editor scripts, copying scripts, and plugin reload.
-- [ ] Close, Close All, Change Pane, Split, Tile, and window navigation using native macOS windows/tabs.
+- [-] Native Close plus two-pane Change Pane exist; Close All, Split, Tile, and multi-window navigation remain missing.
 - [ ] Help, Release Notes, Translations, Configuration, license, and About MacMerge.
 - [ ] Add menu validation tests for title, order, shortcut, checked state, enabled state, target action, and result.
 
@@ -377,7 +377,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] Test Next/Previous Difference with `F8`/`F7` and platform-safe equivalents for WinMerge Alt-arrow shortcuts.
 - [ ] Test First/Current/Last Difference equivalents for Alt-Home/Enter/End.
 - [ ] Test directional copy and copy-and-advance without stealing standard word/paragraph navigation from selectable text.
-- [-] Select Line Difference `F4`, Refresh `F5`, and guarded Reload `Command-F5` verified in the packaged app; Change Pane `F6` and Merge Mode `F9` remain missing.
+- [x] Select Line Difference `F4`, Refresh `F5`, guarded Reload `Command-F5`, Change Pane `F6`/`Shift-F6`, and Merge Mode `F9` exist.
 - [ ] Test every shortcut in empty, disabled, loading, selected, dirty, and text-focused states.
 
 ## Diff Core Provenance and Parity Audit
@@ -415,7 +415,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Empty left, empty right, and both empty.
 - [x] Missing final EOL and EOL-only differences.
 - [x] LF, CRLF, CR, mixed EOL, and strict versus ignored EOL.
-- [ ] Multiple adjacent hunks and hunks separated by one unchanged line.
+- [x] Multiple adjacent hunks and hunks separated by one unchanged line.
 - [ ] Long repeated runs, duplicate lines, reordered blocks, and adversarial hash collisions.
 - [ ] Files containing NUL bytes and binary-looking text according to WinMerge policy.
 - [ ] Maximum accepted byte/line boundaries and one-unit-over rejection.
@@ -429,7 +429,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Ignore line-ending style.
 - [ ] Indent heuristic parity against WinMerge fixtures.
 - [ ] Unicode case-folding and locale behavior versus WinMerge byte/code-page behavior.
-- [ ] Combined-option matrix using pairwise coverage plus high-risk exhaustive combinations.
+- [-] Combined-option coverage includes exhaustive blank-line/EOL/whitespace matrices and filter/substitution interactions; broader pairwise option generation remains pending.
 
 ### Filter and substitution tests
 
@@ -437,10 +437,10 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Multiline regex anchors for LF, CRLF, and CR.
 - [x] WinMerge capture references and supported replacement escapes.
 - [x] Reject substitutions that change line structure unexpectedly.
-- [ ] Comment-filter parity for every supported syntax parser.
-- [ ] Unequal filtered runs adjacent to real edits.
-- [ ] Multiple overlapping line filters and substitutions with deterministic precedence.
-- [ ] Raw-byte substitution escapes `0x80...0xFF` using a byte-oriented transform instead of fail-closed String handling.
+- [-] Ignore comment differences persists and handles basic C-family line/block comments, WinMerge's legacy Perl/PO/PowerShell/Ruby/Shell/TCL hash-line parsers, Python triple-quoted strings, SQL `//`/`--`/`/* */`, and XML/HTML/SGML/Markdown `<!-- -->` comments while preserving covered code and quoted delimiters; C/C++ continuation, digit-separator/raw-string and C# verbatim-string corners, HTML embedded languages, MATLAB, Properties, TOML, YAML, and WinMerge's remaining syntax-parser families are pending.
+- [x] Unequal filtered runs adjacent to real edits.
+- [x] Multiple overlapping line filters and substitutions with deterministic declared-order precedence.
+- [-] Raw-byte substitution escapes `0x80...0xFF` use bounded collision-free placeholders against source and replacement literals and exact bytes in native xdiff input; byte-oriented chained substitution behavior remains pending because later regex rules can still match placeholders.
 - [ ] Regex invalidity, catastrophic-backtracking limits, cancellation, and memory bounds.
 
 ### Moved-block and intra-line tests
@@ -474,7 +474,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ### Performance and UI integration tests
 
-- [ ] Benchmark 10k, 100k, 250k, and 1M rows with fixed CPU, memory, load, first-render, and scroll budgets.
+- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets with performance signposts; Instruments trace capture remains pending.
 - [ ] Benchmark extremely long lines, tabs, wide Unicode, and dense difference sets.
 - [ ] Assert comparison and render metadata stay off the main actor.
 - [ ] Assert stale canceled comparisons cannot publish over newer input.
@@ -494,7 +494,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 ## Milestone 7: Release engineering
 
 - [-] Add CI for tests, release builds, formatting, and static analysis (tests, strict builds, xdiff path coverage, and package artifact complete).
-- [-] Add performance and memory regression suites (deterministic xdiff allocation-failure sweep and CI Address Sanitizer run complete).
+- [-] Add performance and memory regression suites (deterministic xdiff allocation-failure sweep, CI Address Sanitizer, 10k-to-1M release comparison benchmarks, and packaged 1M-row UI/memory budgets complete; Instruments trace automation remains pending).
 - [ ] Add crash reporting and privacy documentation.
 - [ ] Configure sandbox entitlements and persistent security-scoped bookmarks.
 - [ ] Sign, notarize, package, and exercise updates on supported macOS versions.
@@ -502,8 +502,8 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Add repeatable million-row scrolling and memory performance benchmarks; reduce remaining materialized row storage.
-2. Expand xdiff fixture parity through comments, blank-line combinations, raw-byte substitutions, and moved-block behavior.
+1. Add Instruments trace automation for packaged 1M-row load and scrolling; continue reducing materialized row storage.
+2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (C-family comments, blank-line combinations, raw-byte substitutions, adjacent hunks, and overlapping-rule precedence complete).
 3. Expand CP932/CP51932/CP50220 coverage against Windows fixtures; keep unsupported mappings fail-closed.
 4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
 5. Expand into directory comparison after text-core behavior is fixture-compatible.

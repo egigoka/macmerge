@@ -141,6 +141,35 @@ final class TextFileDocumentTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), Data("cafe\u{301}\n".utf8))
     }
 
+    func testCleanSaveAsPreservesExactBytesAndSource() throws {
+        let original = Data([0xFA, 0x5C])
+        let source = try temporaryFile(data: original)
+        let destination = source.deletingLastPathComponent().appending(path: "copy.txt")
+        let document = try TextFileDocumentIO.load(from: source)
+
+        let saved = try TextFileDocumentIO.saveAs(document, to: destination)
+
+        XCTAssertEqual(try Data(contentsOf: source), original)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertEqual(saved.url, destination)
+        XCTAssertFalse(saved.isDirty)
+    }
+
+    func testEditedSaveAsPreservesEncodingAndByteOrderMark() throws {
+        let source = try temporaryFile(data: Data([0xEF, 0xBB, 0xBF]) + Data("old\r\n".utf8))
+        let destination = source.deletingLastPathComponent().appending(path: "copy.txt")
+        var document = try TextFileDocumentIO.load(from: source)
+        document.text = "new\r\n"
+
+        let saved = try TextFileDocumentIO.saveAs(document, to: destination)
+
+        XCTAssertEqual(try Data(contentsOf: source), Data([0xEF, 0xBB, 0xBF]) + Data("old\r\n".utf8))
+        XCTAssertEqual(try Data(contentsOf: destination), Data([0xEF, 0xBB, 0xBF]) + Data("new\r\n".utf8))
+        XCTAssertEqual(saved.encoding, .utf8)
+        XCTAssertTrue(saved.hasByteOrderMark)
+        XCTAssertFalse(saved.isDirty)
+    }
+
     private func temporaryFile(data: Data) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)

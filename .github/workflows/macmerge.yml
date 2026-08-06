@@ -39,10 +39,18 @@ jobs:
       - name: Build release
         run: swift build -c release -Xswiftc -warnings-as-errors
 
+      - name: Benchmark large text comparisons
+        run: swift run -c release MacMergeBenchmark > benchmark.csv
+
       - name: Package application
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: Scripts/package-app.sh
+
+      - name: Enforce packaged-app performance budgets
+        env:
+          SKIP_PACKAGE: 1
+        run: Scripts/run-performance-budgets.sh
 
       - name: Verify application bundle
         run: |
@@ -57,5 +65,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MacMerge-${{ runner.arch }}
-          path: MacMerge/dist/MacMerge.zip
+          path: |
+            MacMerge/dist/MacMerge.zip
+            MacMerge/benchmark.csv
+            MacMerge/dist/performance-report.json
           if-no-files-found: error

@@ -180,6 +180,17 @@ final class LineDiffTests: XCTestCase {
         }
     }
 
+    func testDisabledLineFiltersDoNotAffectComparison() throws {
+        let options = LineDiffOptions(
+            lineFiltersEnabled: false,
+            lineFilters: [LineFilterRule(pattern: #"^# "#)]
+        )
+
+        let rows = try LineDiff.compare(left: "# old\n", right: "# new\n", options: options)
+
+        XCTAssertEqual(rows.map(\.kind), [.modified])
+    }
+
     func testLineFiltersSplitIgnoredRowsFromAdjacentRealChanges() throws {
         let rows = try LineDiff.compare(
             left: "head\n# old\n# extra\nreal-left\ntail",
@@ -252,6 +263,17 @@ final class LineDiffTests: XCTestCase {
         }
     }
 
+    func testDisabledSubstitutionsDoNotAffectComparison() throws {
+        let options = LineDiffOptions(
+            substitutionsEnabled: false,
+            substitutions: [SubstitutionRule(pattern: #"\d+"#, replacement: "")]
+        )
+
+        let rows = try LineDiff.compare(left: "value 1\n", right: "value 2\n", options: options)
+
+        XCTAssertEqual(rows.map(\.kind), [.modified])
+    }
+
     func testSubstitutionFiltersUseWinMergeBackreferencesAndEscapes() throws {
         let captureRows = try LineDiff.compare(
             left: "ABC-123",
@@ -298,16 +320,39 @@ final class LineDiffTests: XCTestCase {
         }
     }
 
-    func testRawNonUTF8SubstitutionBytesFailClosed() {
-        XCTAssertThrowsError(try LineDiff.compare(
+    func testRawNonUTF8SubstitutionBytesCompareExactly() throws {
+        let equalRows = try LineDiff.compare(
             left: "def",
-            right: "def",
+            right: "ghi",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "def", replacement: #"\x01\xEF\xab\x"#),
+                SubstitutionRule(pattern: "ghi", replacement: #"\x01\xEF\xab\x"#),
+            ])
+        )
+        let differentRows = try LineDiff.compare(
+            left: "def",
+            right: "ghi",
             options: LineDiffOptions(substitutions: [
                 SubstitutionRule(pattern: "def", replacement: #"\xEF"#),
+                SubstitutionRule(pattern: "ghi", replacement: #"\xEE"#),
             ])
-        )) { error in
-            XCTAssertEqual(error as? LineDiffError, .unsupportedSubstitutionByte(0xEF))
-        }
+        )
+
+        XCTAssertEqual(DiffSummary(rows: equalRows).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: differentRows).differences, 1)
+    }
+
+    func testRawByteSubstitutionDoesNotCollideWithReplacementLiteral() throws {
+        let rows = try LineDiff.compare(
+            left: "literal",
+            right: "byte",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "literal", replacement: "\u{F0000}"),
+                SubstitutionRule(pattern: "byte", replacement: #"\x80"#),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 1)
     }
 
     func testComparisonFiltersRejectInvalidOrStructuralReplacements() throws {
@@ -327,6 +372,142 @@ final class LineDiffTests: XCTestCase {
         )) { error in
             XCTAssertEqual(error as? LineDiffError, .filterChangedLineStructure)
         }
+    }
+
+    func testCFamilyCommentDifferencesAreIgnored() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+        let singleLine = try LineDiff.compare(
+            left: "a\n// left\nc",
+            right: "a\n// right\nc",
+            options: options
+        )
+        let block = try LineDiff.compare(
+            left: "a\n/*\nleft\n*/\nc",
+            right: "a\n/*\nright\nextra\n*/\nc",
+            options: options
+        )
+        let inline = try LineDiff.compare(
+            left: "value(); // left",
+            right: "value(); // right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: singleLine).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: block).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: inline).differences, 0)
+    }
+
+    func testCFamilyCommentFilteringPreservesCodeAndQuotedDelimiters() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+        let code = try LineDiff.compare(
+            left: "left(); // comment",
+            right: "right(); // comment",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: #"let url = "https://left";"#,
+            right: #"let url = "https://right";"#,
+            options: options
+        )
+        let removed = try LineDiff.compare(
+            left: "prefix/* comment */suffix",
+            right: "prefixsuffix",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: code).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: removed).differences, 0)
+    }
+
+    func testCommentSyntaxUsesWinMergeExtensionFamilies() {
+        XCTAssertEqual(CommentSyntax(fileExtension: "CPP"), .cFamily)
+        XCTAssertEqual(CommentSyntax(fileExtension: "sh"), .hashLine)
+        XCTAssertEqual(CommentSyntax(fileExtension: "py"), .python)
+        XCTAssertEqual(CommentSyntax(fileExtension: "sql"), .sql)
+        XCTAssertEqual(CommentSyntax(fileExtension: "xml"), .markup)
+        XCTAssertEqual(CommentSyntax(fileExtension: "html"), .markup)
+        XCTAssertNil(CommentSyntax(fileExtension: "m"))
+        XCTAssertNil(CommentSyntax(fileExtension: "yaml"))
+        XCTAssertNil(CommentSyntax(fileExtension: "txt"))
+    }
+
+    func testHashCommentDifferencesAreIgnoredWithoutChangingQuotedHashes() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .hashLine)
+        let comments = try LineDiff.compare(
+            left: "value = 1 # left\n# old",
+            right: "value = 1 # right\n# new",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "value = \"#left\"",
+            right: "value = \"#right\"",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+    }
+
+    func testPythonTripleQuotedHashesRemainSignificant() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .python)
+        let rows = try LineDiff.compare(
+            left: "\"\"\"\n# left\n\"\"\"\nvalue = 1 # comment",
+            right: "\"\"\"\n# right\n\"\"\"\nvalue = 1 # changed",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 1)
+    }
+
+    func testSQLCommentDifferencesAreIgnoredWithoutChangingQuotedDelimiters() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .sql)
+        let comments = try LineDiff.compare(
+            left: "SELECT 1; -- left\n/* old\ncomment */",
+            right: "SELECT 1; // right\n/* new\ncomment */",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: #"SELECT '-- left';"#,
+            right: #"SELECT '-- right';"#,
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+    }
+
+    func testMarkupCommentDifferencesAreIgnoredWithoutChangingQuotedDelimiters() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .markup)
+        let comments = try LineDiff.compare(
+            left: "<root>\n<!-- left\nold -->\n</root>",
+            right: "<root>\n<!-- right\nnew -->\n</root>",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: #"<node value="<!-- left -->"/>"#,
+            right: #"<node value="<!-- right -->"/>"#,
+            options: options
+        )
+        let prose = try LineDiff.compare(
+            left: "don't <!-- left --> change",
+            right: "don't <!-- right --> change",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: prose).differences, 0)
+    }
+
+    func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {
+        let rows = try LineDiff.compare(
+            left: "// left",
+            right: "// right",
+            options: LineDiffOptions(ignoreComments: true)
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 1)
     }
 
     func testFinalNewlineCanBeComparedOrIgnored() throws {
@@ -633,6 +814,61 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: content).differences, 1)
     }
 
+    func testIgnoreBlankLinesMatrixPreservesRealEdits() throws {
+        let blankInsertions = ["\n", "\r", "\r\n", " \n", "\t\r\n"]
+        let whitespaceModes: [WhitespaceComparison] = [.compareAll, .ignoreChanges, .ignoreAll]
+
+        for whitespace in whitespaceModes {
+            let options = LineDiffOptions(
+                whitespace: whitespace,
+                ignoreBlankLines: true
+            )
+            for blank in blankInsertions {
+                let inserted = try LineDiff.compare(
+                    left: "head\n\(blank)tail",
+                    right: "head\ntail",
+                    options: options
+                )
+                let realEdit = try LineDiff.compare(
+                    left: "head\n\(blank)left\ntail",
+                    right: "head\nright\ntail",
+                    options: options
+                )
+
+                XCTAssertEqual(
+                    DiffSummary(rows: inserted).differences,
+                    0,
+                    "Whitespace: \(whitespace), blank: \(blank.debugDescription)"
+                )
+                XCTAssertEqual(
+                    DiffSummary(rows: realEdit).differences,
+                    1,
+                    "Whitespace: \(whitespace), blank: \(blank.debugDescription)"
+                )
+            }
+        }
+    }
+
+    func testIgnoreBlankLinesFinalEOLMatrix() throws {
+        let fixtures = ["", "\r\n", "1", "1\r\n", "1\r\n2\r\n3", "1\r\n2\r\n3\r\n"]
+
+        for whitespace in [WhitespaceComparison.compareAll, .ignoreChanges, .ignoreAll] {
+            let options = LineDiffOptions(
+                whitespace: whitespace,
+                ignoreBlankLines: true
+            )
+            for left in fixtures {
+                for right in fixtures {
+                    let rows = try LineDiff.compare(left: left, right: right, options: options)
+                    if left.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == right.trimmingCharacters(in: .whitespacesAndNewlines) {
+                        XCTAssertEqual(DiffSummary(rows: rows).differences, 0)
+                    }
+                }
+            }
+        }
+    }
+
     func testMergeAllRejectsEqualContent() throws {
         XCTAssertNil(try LineMerge.applyAll(
             direction: .leftToRight,
@@ -779,6 +1015,69 @@ final class LineDiffTests: XCTestCase {
             )
             XCTAssertEqual(rows.filter { $0.kind == .unchanged }.map(\.id), expected)
         }
+    }
+
+    func testMultipleHunksPreserveSingleUnchangedSeparator() throws {
+        let rows = try LineDiff.compare(
+            left: "head\nleft-one\nseparator\nleft-two\ntail",
+            right: "head\nright-one\nseparator\nright-two\ntail"
+        )
+
+        XCTAssertEqual(rows.map(\.kind), [
+            .unchanged, .modified, .unchanged, .modified, .unchanged,
+        ])
+        XCTAssertEqual(rows.map(\.id), [id(1, 1), id(2, 2), id(3, 3), id(4, 4), id(5, 5)])
+    }
+
+    func testAdjacentChangesRemainOneMonotonicAlignedRun() throws {
+        let rows = try LineDiff.compare(
+            left: "head\nleft-one\nleft-two\ntail",
+            right: "head\nright-one\nright-two\ntail"
+        )
+
+        XCTAssertEqual(rows.map(\.kind), [.unchanged, .modified, .modified, .unchanged])
+        XCTAssertEqual(rows.map(\.id), [id(1, 1), id(2, 2), id(3, 3), id(4, 4)])
+    }
+
+    func testOverlappingLineFiltersIgnoreLineWhenAnyRuleMatches() throws {
+        let rows = try LineDiff.compare(
+            left: "head\n# generated old\ntail",
+            right: "head\n# generated new\ntail",
+            options: LineDiffOptions(lineFilters: [
+                LineFilterRule(pattern: #"^# "#),
+                LineFilterRule(pattern: #"generated"#),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 0)
+    }
+
+    func testOverlappingSubstitutionsApplyInDeclaredOrder() throws {
+        let forward = LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: "build", replacement: "release"),
+            SubstitutionRule(pattern: "release \\d+", replacement: "version"),
+        ])
+        let reverse = LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: "release \\d+", replacement: "version"),
+            SubstitutionRule(pattern: "build", replacement: "release"),
+        ])
+
+        XCTAssertEqual(
+            DiffSummary(rows: try LineDiff.compare(
+                left: "build 123",
+                right: "version",
+                options: forward
+            )).differences,
+            0
+        )
+        XCTAssertEqual(
+            DiffSummary(rows: try LineDiff.compare(
+                left: "build 123",
+                right: "version",
+                options: reverse
+            )).differences,
+            1
+        )
     }
 
     func testXDiffRecoversFromEveryAllocationFailure() throws {
