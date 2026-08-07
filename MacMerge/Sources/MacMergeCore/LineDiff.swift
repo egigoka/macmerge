@@ -28,6 +28,15 @@ public enum CommentSyntax: Equatable, Sendable {
     case python
     case sql
     case markup
+    case matlab
+    case properties
+    case toml
+    case yaml
+    case basic
+    case css
+    case ini
+    case tex
+    case adaVhdl
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
@@ -41,6 +50,24 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .python
         case "sql":
             self = .sql
+        case "m":
+            self = .matlab
+        case "properties":
+            self = .properties
+        case "toml":
+            self = .toml
+        case "yaml", "yml":
+            self = .yaml
+        case "bas", "vb", "vbs", "frm", "dsm", "cls", "ctl", "pag", "dsr":
+            self = .basic
+        case "css":
+            self = .css
+        case "ini", "reg", "vbp", "isl":
+            self = .ini
+        case "tex", "sty", "clo", "ltx", "fd", "dtx":
+            self = .tex
+        case "ads", "adb", "vhd", "vhdl", "vho":
+            self = .adaVhdl
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -173,6 +200,7 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
     case invalidRegularExpression(String)
     case filterChangedLineStructure
     case rawBytePlaceholderUnavailable
+    case substitutionEngineFailure(Int32)
     case invalidNativeResult
 
     public var errorDescription: String? {
@@ -189,6 +217,8 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
             "A substitution inserted a line ending. Comparison substitutions must preserve line structure."
         case .rawBytePlaceholderUnavailable:
             "Raw-byte substitutions could not reserve a collision-free placeholder range."
+        case let .substitutionEngineFailure(code):
+            "WinMerge substitution engine failed with code \(code)."
         case .invalidNativeResult:
             "WinMerge comparison engine returned invalid line ranges."
         }
@@ -478,10 +508,9 @@ public enum LineDiff {
             rightComments: commentFiltered?.right.slice(start: hunk.rightStart, count: hunk.rightCount)
         )
         let secondaryHunks = try nativeHunks(
-            left: prepared.left.text,
-            right: prepared.right.text,
-            options: options,
-            rawByteEncoding: prepared.rawByteEncoding
+            left: prepared.left.bytes,
+            right: prepared.right.bytes,
+            options: options
         )
         var localLeftIndex = 0
         var localRightIndex = 0
@@ -538,12 +567,17 @@ public enum LineDiff {
     private static func nativeHunks(
         left: String,
         right: String,
-        options: LineDiffOptions,
-        rawByteEncoding: RawByteEncoding? = nil
+        options: LineDiffOptions
+    ) throws -> [NativeHunk] {
+        try nativeHunks(left: Array(left.utf8), right: Array(right.utf8), options: options)
+    }
+
+    private static func nativeHunks(
+        left leftBytes: [UInt8],
+        right rightBytes: [UInt8],
+        options: LineDiffOptions
     ) throws -> [NativeHunk] {
         let maximumBytes = Int(MMX_MAX_INPUT_SIZE)
-        let leftBytes = rawByteEncoding?.encode(left) ?? Array(left.utf8)
-        let rightBytes = rawByteEncoding?.encode(right) ?? Array(right.utf8)
         guard leftBytes.count <= maximumBytes, rightBytes.count <= maximumBytes else {
             throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
         }
@@ -601,64 +635,13 @@ private struct NativeHunk {
 }
 
 private struct PreparedComparison {
-    let text: String
+    let bytes: [UInt8]
     let filteredLines: [Bool]
 }
 
 private struct PreparedComparisonPair {
     let left: PreparedComparison
     let right: PreparedComparison
-    let rawByteEncoding: RawByteEncoding?
-}
-
-private struct RawByteEncoding {
-    private let scalarBase: UInt32
-
-    init(reservedStrings: [String]) throws {
-        let candidateBases = Array(stride(from: UInt32(0xF0000), through: 0xFFF00, by: 128))
-            + Array(stride(from: UInt32(0x100000), through: 0x10FF00, by: 128))
-        var occupied = Set<UInt32>()
-        for string in reservedStrings {
-            for scalar in string.unicodeScalars {
-                let value = scalar.value
-                if (0xF0000...0xFFFFD).contains(value) {
-                    occupied.insert(0xF0000 + (value - 0xF0000) / 128 * 128)
-                } else if (0x100000...0x10FFFD).contains(value) {
-                    occupied.insert(0x100000 + (value - 0x100000) / 128 * 128)
-                }
-            }
-        }
-        guard let scalarBase = candidateBases.first(where: { !occupied.contains($0) }) else {
-            throw LineDiffError.rawBytePlaceholderUnavailable
-        }
-        self.scalarBase = scalarBase
-    }
-
-    func placeholder(for byte: UInt8) -> UnicodeScalar {
-        precondition(byte >= 0x80)
-        return UnicodeScalar(scalarBase + UInt32(byte - 0x80))!
-    }
-
-    func encode(_ text: String) -> [UInt8] {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(text.utf8.count)
-        for scalar in text.unicodeScalars {
-            if scalar.value >= scalarBase, scalar.value < scalarBase + 128 {
-                bytes.append(UInt8(scalar.value - scalarBase) + 0x80)
-            } else {
-                bytes.append(contentsOf: String(scalar).utf8)
-            }
-        }
-        return bytes
-    }
-
-    func byteCount(_ text: Substring) -> Int {
-        text.unicodeScalars.reduce(into: 0) { count, scalar in
-            count += scalar.value >= scalarBase && scalar.value < scalarBase + 128
-                ? 1
-                : String(scalar).utf8.count
-        }
-    }
 }
 
 private struct ComparisonTransform {
@@ -684,11 +667,26 @@ private struct ComparisonTransform {
         case literal(String)
         case capture(Int)
         case rawByte(UInt8)
+
+        var bytes: [UInt8] {
+            switch self {
+            case let .literal(value):
+                Array(value.utf8)
+            case let .capture(group):
+                Array("$\(group)".utf8)
+            case let .rawByte(byte):
+                [byte]
+            }
+        }
     }
 
     private struct CompiledRule {
+        let pattern: String
+        let caseSensitive: Bool
         let expression: NSRegularExpression
         let replacement: [ReplacementPart]?
+
+        var replacementBytes: [UInt8] { replacement?.flatMap(\.bytes) ?? [] }
     }
 
     private let lineFilters: [CompiledRule]
@@ -699,14 +697,27 @@ private struct ComparisonTransform {
 
     init(options: LineDiffOptions) throws {
         lineFilters = try (options.lineFiltersEnabled ? options.lineFilters : []).map {
-            CompiledRule(
+            return CompiledRule(
+                pattern: $0.pattern,
+                caseSensitive: $0.caseSensitive,
                 expression: try Self.compile(pattern: $0.pattern, caseSensitive: $0.caseSensitive),
                 replacement: nil
             )
         }
-        substitutions = try (options.substitutionsEnabled ? options.substitutions : []).map {
-            CompiledRule(
-                expression: try Self.compile(pattern: $0.pattern, caseSensitive: $0.caseSensitive),
+        substitutions = try (options.substitutionsEnabled ? options.substitutions : [])
+            .filter { !$0.pattern.isEmpty }
+            .map {
+            _ = try Self.replaceBytes(
+                in: [],
+                pattern: Array($0.pattern.utf8),
+                replacement: [],
+                caseSensitive: $0.caseSensitive,
+                maximumBytes: Int(MMX_MAX_INPUT_SIZE)
+            )
+            return CompiledRule(
+                pattern: $0.pattern,
+                caseSensitive: $0.caseSensitive,
+                expression: try Self.compile(pattern: "(?:)", caseSensitive: true),
                 replacement: try Self.parseReplacement($0.replacement)
             )
         }
@@ -721,37 +732,19 @@ private struct ComparisonTransform {
         rightComments: CommentFilteredContents? = nil
     ) throws -> PreparedComparisonPair {
         let marker = collisionFreeMarker(left: left.text, right: right.text)
-        let usesRawBytes = substitutions.contains { rule in
-            rule.replacement?.contains { part in
-                if case .rawByte = part { return true }
-                return false
-            } == true
-        }
-        let replacementLiterals: [String] = substitutions.flatMap { rule -> [String] in
-            rule.replacement?.compactMap { part -> String? in
-                if case let .literal(value) = part { return value }
-                return nil
-            } ?? []
-        }
-        let rawByteEncoding = usesRawBytes
-            ? try RawByteEncoding(reservedStrings: [left.text, right.text] + replacementLiterals)
-            : nil
         return try PreparedComparisonPair(
             left: prepare(
                 document: left,
                 marker: marker,
                 options: options,
-                rawByteEncoding: rawByteEncoding,
                 commentFiltered: leftComments
             ),
             right: prepare(
                 document: right,
                 marker: marker,
                 options: options,
-                rawByteEncoding: rawByteEncoding,
                 commentFiltered: rightComments
-            ),
-            rawByteEncoding: rawByteEncoding
+            )
         )
     }
 
@@ -759,7 +752,6 @@ private struct ComparisonTransform {
         document: TextDocument,
         marker: String,
         options: LineDiffOptions,
-        rawByteEncoding: RawByteEncoding?,
         commentFiltered: CommentFilteredContents?
     ) throws -> PreparedComparison {
         var contents: [String] = []
@@ -779,32 +771,45 @@ private struct ComparisonTransform {
             filteredLines.append(isFiltered)
         }
 
-        var transformedText = zip(contents, document.records)
+        let transformedText = zip(contents, document.records)
             .map { $0 + $1.terminator }
             .joined()
+        var transformedBytes = Array(transformedText.utf8)
         for substitution in substitutions {
-            guard let replacement = substitution.replacement else { continue }
-            transformedText = try Self.replace(
-                in: transformedText,
-                using: substitution.expression,
-                replacement: replacement,
-                maximumBytes: maximumBytes,
-                rawByteEncoding: rawByteEncoding
+            transformedBytes = try Self.replaceBytes(
+                in: transformedBytes,
+                pattern: Array(substitution.pattern.utf8),
+                replacement: substitution.replacementBytes,
+                caseSensitive: substitution.caseSensitive,
+                maximumBytes: maximumBytes
             )
         }
-        let transformed = TextDocument(text: transformedText)
-        guard transformed.records.count == document.records.count else {
+        var transformedRecords = Self.byteRecords(transformedBytes)
+        if transformedRecords.count + 1 == document.records.count,
+           document.records.last?.terminator.isEmpty == true,
+           transformedBytes.isEmpty || transformedBytes.last == 10 || transformedBytes.last == 13 {
+            transformedRecords.append(([], []))
+        }
+        guard transformedRecords.count == document.records.count else {
             throw LineDiffError.filterChangedLineStructure
         }
-        let comparisonContents = zip(transformed.records, filteredLines).map { record, isFiltered in
-            if isFiltered { return marker }
+        var comparisonBytes: [UInt8] = []
+        comparisonBytes.reserveCapacity(transformedBytes.count + transformedRecords.count * 2)
+        for ((content, terminator), isFiltered) in zip(transformedRecords, filteredLines) {
+            if isFiltered {
+                comparisonBytes.append(contentsOf: marker.utf8)
+                comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
+                continue
+            }
             let preservesBlankLine = options.ignoreBlankLines &&
-                record.content.unicodeScalars.allSatisfy { $0 == " " || $0 == "\t" }
-            return preservesBlankLine ? record.content : "U:" + record.content
+                content.allSatisfy { $0 == 32 || $0 == 9 }
+            if !preservesBlankLine { comparisonBytes.append(contentsOf: [85, 58]) }
+            comparisonBytes.append(contentsOf: content)
+            comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
         }
 
         return PreparedComparison(
-            text: transformed.comparisonText(contents: comparisonContents, options: options),
+            bytes: comparisonBytes,
             filteredLines: filteredLines
         )
     }
@@ -819,6 +824,28 @@ private struct ComparisonTransform {
         in document: TextDocument
     ) -> CommentFilteredContents? {
         guard let commentSyntax else { return nil }
+        switch commentSyntax {
+        case .matlab:
+            return matlabCommentFilteredContents(in: document)
+        case .properties:
+            return propertiesCommentFilteredContents(in: document)
+        case .toml:
+            return tomlCommentFilteredContents(in: document)
+        case .yaml:
+            return yamlCommentFilteredContents(in: document)
+        case .basic:
+            return quotedLineCommentFilteredContents(in: document, delimiter: "'", quote: "\"")
+        case .css:
+            return blockCommentFilteredContents(in: document, opener: "/*", closer: "*/")
+        case .ini:
+            return firstNonspaceCommentFilteredContents(in: document, delimiters: [";"])
+        case .tex:
+            return texCommentFilteredContents(in: document)
+        case .adaVhdl:
+            return unquotedLineCommentFilteredContents(in: document, delimiter: "--")
+        default:
+            break
+        }
         let lineDelimiters: [String]
         let blockDelimiter: (start: String, end: String)?
         let supportsTripleQuotedStrings: Bool
@@ -843,6 +870,8 @@ private struct ComparisonTransform {
             lineDelimiters = []
             blockDelimiter = ("<!--", "-->")
             supportsTripleQuotedStrings = false
+        case .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl:
+            preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
         var commentOnly: [Bool] = []
@@ -856,7 +885,6 @@ private struct ComparisonTransform {
         for record in document.records {
             var output = ""
             var index = record.content.startIndex
-            var escaped = false
             var containedComment = inBlockComment
 
             while index < record.content.endIndex {
@@ -889,11 +917,7 @@ private struct ComparisonTransform {
 
                 if let activeQuote = quote {
                     output.append(character)
-                    if escaped {
-                        escaped = false
-                    } else if character == "\\" {
-                        escaped = true
-                    } else if character == activeQuote {
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
                         quote = nil
                     }
                     index = nextIndex
@@ -941,6 +965,492 @@ private struct ComparisonTransform {
             contents.append(output)
             commentOnly.append(
                 containedComment && output.unicodeScalars.allSatisfy { $0 == " " || $0 == "\t" }
+            )
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func matlabCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var blockDepth = 0
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var quote: Character?
+            var containedComment = blockDepth > 0
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+                let remainder = record.content[index...]
+
+                if blockDepth > 0 {
+                    containedComment = true
+                    if remainder.hasPrefix("%{") {
+                        blockDepth += 1
+                        index = record.content.index(index, offsetBy: 2)
+                    } else if remainder.hasPrefix("%}") {
+                        blockDepth -= 1
+                        index = record.content.index(index, offsetBy: 2)
+                    } else {
+                        index = nextIndex
+                    }
+                    continue
+                }
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+
+                if remainder.hasPrefix("%{") {
+                    let afterOpener = record.content.index(index, offsetBy: 2)
+                    if afterOpener == record.content.endIndex || record.content[afterOpener].isWhitespace {
+                        containedComment = true
+                        blockDepth = 1
+                        index = afterOpener
+                        continue
+                    }
+                }
+                if character == "%" {
+                    containedComment = true
+                    break
+                }
+                if remainder.hasPrefix("...") {
+                    output.append(contentsOf: "...")
+                    index = record.content.index(index, offsetBy: 3)
+                    if index < record.content.endIndex { containedComment = true }
+                    break
+                }
+                if character == "\"" {
+                    quote = character
+                } else if character == "'" {
+                    let opensString = index == record.content.startIndex ||
+                        !record.content[record.content.index(before: index)].isLetter &&
+                        !record.content[record.content.index(before: index)].isNumber
+                    if opensString { quote = character }
+                }
+                output.append(character)
+                index = nextIndex
+            }
+
+            contents.append(output)
+            commentOnly.append(
+                !record.content.isEmpty && containedComment && output.allSatisfy { $0 == " " || $0 == "\t" }
+            )
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func propertiesCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var continuesValue = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let firstContent = record.content.firstIndex { $0 != " " && $0 != "\t" && $0 != "\u{000C}" }
+            let isComment = !continuesValue && firstContent.map {
+                record.content[$0] == "#" || record.content[$0] == "!"
+            } == true
+            if isComment {
+                let leading = firstContent.map { String(record.content[..<$0]) } ?? ""
+                contents.append(leading)
+                commentOnly.append(true)
+                continuesValue = false
+            } else {
+                contents.append(record.content)
+                commentOnly.append(false)
+                continuesValue = record.content.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2) == false
+            }
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func tomlCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var multilineDelimiter: String?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var quote: Character?
+            var escaped = false
+            var containedComment = false
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+                let remainder = record.content[index...]
+
+                if let delimiter = multilineDelimiter {
+                    if delimiter == "\"\"\"", escaped {
+                        output.append(character)
+                        escaped = false
+                        index = nextIndex
+                    } else if delimiter == "\"\"\"", character == "\\" {
+                        output.append(character)
+                        escaped = true
+                        index = nextIndex
+                    } else if remainder.hasPrefix(delimiter) {
+                        let runLength = remainder.prefix(while: { $0 == character }).count
+                        if runLength > 5 {
+                            output.append(character)
+                            index = nextIndex
+                            continue
+                        }
+                        if runLength > delimiter.count {
+                            output.append(contentsOf: String(repeating: character, count: runLength - delimiter.count))
+                        }
+                        output.append(contentsOf: delimiter)
+                        index = record.content.index(index, offsetBy: runLength)
+                        multilineDelimiter = nil
+                    } else {
+                        output.append(character)
+                        index = nextIndex
+                    }
+                    continue
+                }
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    if activeQuote == "\"" {
+                        if escaped {
+                            escaped = false
+                        } else if character == "\\" {
+                            escaped = true
+                        } else if character == activeQuote {
+                            quote = nil
+                        }
+                    } else if character == activeQuote {
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+
+                if let delimiter = ["\"\"\"", "'''"].first(where: remainder.hasPrefix) {
+                    multilineDelimiter = delimiter
+                    output.append(contentsOf: delimiter)
+                    index = record.content.index(index, offsetBy: delimiter.count)
+                    continue
+                }
+                if character == "#" {
+                    containedComment = true
+                    break
+                }
+                if character == "\"" || character == "'" { quote = character }
+                output.append(character)
+                index = nextIndex
+            }
+
+            contents.append(output)
+            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func yamlCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var quote: Character?
+        var blockScalarIndent: Int?
+        var pendingBlockScalar: (parentIndent: Int, explicitIndent: Int?)?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let leadingSpaces = record.content.prefix(while: { $0 == " " }).count
+            let isBlank = record.content.allSatisfy(\.isWhitespace)
+
+            if let pending = pendingBlockScalar, !isBlank {
+                let requiredIndent = pending.explicitIndent.map { pending.parentIndent + $0 } ?? leadingSpaces
+                if leadingSpaces > pending.parentIndent, leadingSpaces >= requiredIndent {
+                    blockScalarIndent = requiredIndent
+                }
+                pendingBlockScalar = nil
+            }
+            if let requiredIndent = blockScalarIndent {
+                if isBlank || leadingSpaces >= requiredIndent {
+                    contents.append(record.content)
+                    commentOnly.append(false)
+                    continue
+                }
+                blockScalarIndent = nil
+            }
+            if pendingBlockScalar != nil, isBlank {
+                contents.append(record.content)
+                commentOnly.append(false)
+                continue
+            }
+
+            var output = ""
+            var index = record.content.startIndex
+            var escaped = false
+            var containedComment = false
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    if activeQuote == "\"" {
+                        if escaped {
+                            escaped = false
+                        } else if character == "\\" {
+                            escaped = true
+                        } else if character == activeQuote {
+                            quote = nil
+                        }
+                    } else if character == "'" {
+                        if nextIndex < record.content.endIndex, record.content[nextIndex] == "'" {
+                            output.append("'")
+                            index = record.content.index(after: nextIndex)
+                            continue
+                        }
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+
+                if character == "#" {
+                    let isSeparated = index == record.content.startIndex ||
+                        [" ", "\t"].contains(record.content[record.content.index(before: index)])
+                    if isSeparated {
+                        containedComment = true
+                        break
+                    }
+                }
+                if character == "\"" || character == "'" {
+                    let startsScalar = index == record.content.startIndex || {
+                        let previous = record.content[record.content.index(before: index)]
+                        return previous == " " || previous == "\t" || "-?:,[]{}".contains(previous)
+                    }()
+                    if startsScalar { quote = character }
+                }
+                output.append(character)
+                index = nextIndex
+            }
+
+            let trimmedOutput = output.drop(while: { $0 == " " || $0 == "\t" })
+            let indicator = trimmedOutput.split(whereSeparator: { $0 == " " || $0 == "\t" }).last
+            let indicatorPrefix = indicator.flatMap { indicator -> Substring? in
+                guard let lastContent = output.lastIndex(where: { $0 != " " && $0 != "\t" }) else { return nil }
+                let indicatorEnd = output.index(after: lastContent)
+                guard let indicatorStart = output.index(
+                    indicatorEnd,
+                    offsetBy: -indicator.count,
+                    limitedBy: output.startIndex
+                ) else { return nil }
+                return output[..<indicatorStart]
+            }
+            let validIndicatorPosition = indicatorPrefix.map(Self.yamlPrefixAllowsBlockScalar) == true
+            if quote == nil, validIndicatorPosition, let indicator,
+               let parsed = Self.yamlBlockScalarIndicator(String(indicator)) {
+                pendingBlockScalar = (leadingSpaces, parsed)
+            }
+            contents.append(output)
+            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func yamlBlockScalarIndicator(_ token: String) -> Int?? {
+        guard let first = token.first, first == "|" || first == ">" else { return nil }
+        var explicitIndent: Int?
+        for character in token.dropFirst() {
+            if character == "+" || character == "-" { continue }
+            guard let value = character.wholeNumberValue, (1...9).contains(value), explicitIndent == nil else {
+                return nil
+            }
+            explicitIndent = value
+        }
+        return .some(explicitIndent)
+    }
+
+    private static func yamlPrefixAllowsBlockScalar(_ prefix: Substring) -> Bool {
+        var tokens = prefix.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        while let token = tokens.last, token.first == "!" || token.first == "&" {
+            tokens.removeLast()
+        }
+        guard let token = tokens.last else { return true }
+        return token == "-" || token == "?" || token.last == ":"
+    }
+
+    private static func twoLookbackQuoteCloses(in text: String, at index: String.Index) -> Bool {
+        guard index > text.startIndex else { return true }
+        let previous = text.index(before: index)
+        guard text[previous] == "\\" else { return true }
+        guard previous > text.startIndex else { return false }
+        return text[text.index(before: previous)] == "\\"
+    }
+
+    private func quotedLineCommentFilteredContents(
+        in document: TextDocument,
+        delimiter: Character,
+        quote: Character?
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var inQuote = false
+            var containedComment = false
+            for character in record.content {
+                if let quote, character == quote {
+                    inQuote.toggle()
+                    output.append(character)
+                } else if !inQuote, character == delimiter {
+                    containedComment = true
+                    break
+                } else {
+                    output.append(character)
+                }
+            }
+            contents.append(output)
+            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func unquotedLineCommentFilteredContents(
+        in document: TextDocument,
+        delimiter: String
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            if let range = record.content.range(of: delimiter) {
+                let output = String(record.content[..<range.lowerBound])
+                contents.append(output)
+                commentOnly.append(output.allSatisfy { $0 == " " || $0 == "\t" })
+            } else {
+                contents.append(record.content)
+                commentOnly.append(false)
+            }
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func texCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var quote: Character?
+            var containedComment = false
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
+                        quote = nil
+                    }
+                } else if character == "%" {
+                    containedComment = true
+                    break
+                } else {
+                    if character == "\"" {
+                        quote = character
+                    } else if character == "'" {
+                        let previousIsAlphanumeric = index > record.content.startIndex &&
+                            record.content[record.content.index(before: index)].isLetter ||
+                            index > record.content.startIndex && record.content[record.content.index(before: index)].isNumber
+                        if !previousIsAlphanumeric { quote = character }
+                    }
+                    output.append(character)
+                }
+                index = record.content.index(after: index)
+            }
+            contents.append(output)
+            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func firstNonspaceCommentFilteredContents(
+        in document: TextDocument,
+        delimiters: Set<Character>
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let firstContent = record.content.firstIndex { $0 != " " && $0 != "\t" }
+            if let firstContent, delimiters.contains(record.content[firstContent]) {
+                contents.append(String(record.content[..<firstContent]))
+                commentOnly.append(true)
+            } else {
+                contents.append(record.content)
+                commentOnly.append(false)
+            }
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func blockCommentFilteredContents(
+        in document: TextDocument,
+        opener: String,
+        closer: String
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inComment = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var containedComment = inComment
+            while index < record.content.endIndex {
+                let remainder = record.content[index...]
+                if inComment {
+                    containedComment = true
+                    if remainder.hasPrefix(closer) {
+                        inComment = false
+                        index = record.content.index(index, offsetBy: closer.count)
+                    } else {
+                        index = record.content.index(after: index)
+                    }
+                } else if remainder.hasPrefix(opener) {
+                    containedComment = true
+                    inComment = true
+                    index = record.content.index(index, offsetBy: opener.count)
+                } else {
+                    output.append(record.content[index])
+                    index = record.content.index(after: index)
+                }
+            }
+            contents.append(output)
+            commentOnly.append(
+                !record.content.isEmpty && containedComment && output.allSatisfy { $0 == " " || $0 == "\t" }
             )
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
@@ -995,11 +1505,11 @@ private struct ComparisonTransform {
                         let secondHexIndex = replacement.index(after: firstHexIndex)
                         if secondHexIndex < replacement.endIndex {
                             let hex = String(replacement[firstHexIndex...secondHexIndex])
-                            if let value = UInt8(hex, radix: 16), value > 0x7F {
+                            if let value = Self.winMergeHexByte(hex), value > 0x7F {
                                 flushLiteral()
                                 parts.append(.rawByte(value))
                                 index = secondHexIndex
-                            } else if let value = UInt8(hex, radix: 16),
+                            } else if let value = Self.winMergeHexByte(hex),
                                       let scalar = UnicodeScalar(Int(value)) {
                                 literal.unicodeScalars.append(scalar)
                                 index = secondHexIndex
@@ -1051,60 +1561,71 @@ private struct ComparisonTransform {
         return Int(value - Character("0").asciiValue!)
     }
 
-    private static func replace(
-        in source: String,
-        using expression: NSRegularExpression,
-        replacement: [ReplacementPart],
-        maximumBytes: Int,
-        rawByteEncoding: RawByteEncoding?
-    ) throws -> String {
-        var output = ""
-        var outputBytes = 0
-        var cursor = 0
-        var failure: LineDiffError?
-        let sourceRange = NSRange(source.startIndex..<source.endIndex, in: source)
+    private static func winMergeHexByte(_ text: String) -> UInt8? {
+        let prefix = text.prefix { $0.isHexDigit }
+        guard !prefix.isEmpty else { return nil }
+        return UInt8(prefix, radix: 16)
+    }
 
-        func append(_ value: Substring) {
-            let bytes = rawByteEncoding?.byteCount(value) ?? value.utf8.count
-            guard bytes <= maximumBytes - outputBytes else {
-                failure = .inputTooLarge(maximumBytes: Int(MMX_MAX_INPUT_SIZE))
-                return
-            }
-            output.append(contentsOf: value)
-            outputBytes += bytes
-        }
-
-        expression.enumerateMatches(in: source, range: sourceRange) { match, _, stop in
-            guard failure == nil, let match else { return }
-            let unmatchedRange = NSRange(location: cursor, length: match.range.location - cursor)
-            if let range = Range(unmatchedRange, in: source) {
-                append(source[range])
-            }
-            for part in replacement where failure == nil {
-                switch part {
-                case let .literal(value):
-                    append(value[...])
-                case let .capture(group):
-                    guard group < match.numberOfRanges,
-                          match.range(at: group).location != NSNotFound,
-                          let range = Range(match.range(at: group), in: source) else { continue }
-                    append(source[range])
-                case let .rawByte(byte):
-                    guard let rawByteEncoding else { continue }
-                    let placeholder = String(rawByteEncoding.placeholder(for: byte))
-                    append(placeholder[...])
+    private static func replaceBytes(
+        in source: [UInt8],
+        pattern: [UInt8],
+        replacement: [UInt8],
+        caseSensitive: Bool,
+        maximumBytes: Int
+    ) throws -> [UInt8] {
+        var result = mmx_bytes_result(bytes: nil, size: 0)
+        let status = source.withUnsafeBytes { sourceBuffer in
+            pattern.withUnsafeBytes { patternBuffer in
+                replacement.withUnsafeBytes { replacementBuffer in
+                    mmx_regex_substitute(
+                        sourceBuffer.baseAddress,
+                        sourceBuffer.count,
+                        patternBuffer.baseAddress,
+                        patternBuffer.count,
+                        replacementBuffer.baseAddress,
+                        replacementBuffer.count,
+                        caseSensitive ? 1 : 0,
+                        maximumBytes,
+                        &result
+                    )
                 }
             }
-            cursor = match.range.location + match.range.length
-            if failure != nil { stop.pointee = true }
         }
-        if let failure { throw failure }
-        let remainder = NSRange(location: cursor, length: sourceRange.length - cursor)
-        if let range = Range(remainder, in: source) {
-            append(source[range])
+        defer { mmx_bytes_result_free(&result) }
+        guard status == 0 else {
+            if status == 1 { throw LineDiffError.invalidRegularExpression(String(decoding: pattern, as: UTF8.self)) }
+            if status == 4 { throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes) }
+            throw LineDiffError.substitutionEngineFailure(status)
         }
-        if let failure { throw failure }
-        return output
+        guard result.size == 0 || result.bytes != nil else {
+            throw LineDiffError.substitutionEngineFailure(3)
+        }
+        return Array(UnsafeBufferPointer(start: result.bytes, count: result.size))
+    }
+
+    private static func byteRecords(_ bytes: [UInt8]) -> [(content: [UInt8], terminator: [UInt8])] {
+        var records: [(content: [UInt8], terminator: [UInt8])] = []
+        var start = 0
+        var index = 0
+        while index < bytes.count {
+            if bytes[index] == 13 {
+                let terminatorEnd = index + 1 < bytes.count && bytes[index + 1] == 10 ? index + 2 : index + 1
+                records.append((Array(bytes[start..<index]), Array(bytes[index..<terminatorEnd])))
+                index = terminatorEnd
+                start = index
+            } else if bytes[index] == 10 {
+                records.append((Array(bytes[start..<index]), [10]))
+                index += 1
+                start = index
+            } else {
+                index += 1
+            }
+        }
+        if start < bytes.count {
+            records.append((Array(bytes[start...] as ArraySlice<UInt8>), []))
+        }
+        return records
     }
 }
 

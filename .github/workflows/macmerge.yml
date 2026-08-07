@@ -42,6 +42,9 @@ jobs:
       - name: Benchmark large text comparisons
         run: swift run -c release MacMergeBenchmark > benchmark.csv
 
+      - name: Benchmark dense text comparisons
+        run: swift run -c release MacMergeBenchmark --lines 100000 --density dense > benchmark-dense.csv
+
       - name: Package application
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -51,6 +54,16 @@ jobs:
         env:
           SKIP_PACKAGE: 1
         run: Scripts/run-performance-budgets.sh
+
+      - name: Capture packaged-app performance trace
+        env:
+          SKIP_PACKAGE: 1
+        run: |
+          if xcrun --find xctrace >/dev/null 2>&1; then
+            Scripts/run-performance-trace.sh
+          else
+            echo "xctrace unavailable; skipping Instruments artifact"
+          fi
 
       - name: Verify application bundle
         run: |
@@ -68,5 +81,8 @@ jobs:
           path: |
             MacMerge/dist/MacMerge.zip
             MacMerge/benchmark.csv
+            MacMerge/benchmark-dense.csv
             MacMerge/dist/performance-report.json
+            MacMerge/dist/MacMerge-performance.trace
+            MacMerge/dist/performance-trace-report.json
           if-no-files-found: error

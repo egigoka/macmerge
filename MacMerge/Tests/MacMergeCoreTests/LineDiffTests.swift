@@ -355,6 +355,135 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: rows).differences, 1)
     }
 
+    func testLaterSubstitutionsMatchRawBytesFromEarlierRules() throws {
+        let rows = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "left", replacement: #"\xEF"#),
+                SubstitutionRule(pattern: "right", replacement: #"\xEE"#),
+                SubstitutionRule(pattern: #"\xEF"#, replacement: "same"),
+                SubstitutionRule(pattern: #"\x{EE}"#, replacement: "same"),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 0)
+    }
+
+    func testRawBytePatternTranslationPreservesQuotedRegexAndEscapedPrivateScalars() throws {
+        let quoted = try LineDiff.compare(
+            left: #"\xEF"#,
+            right: "byte",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "byte", replacement: #"\xEF"#),
+                SubstitutionRule(pattern: #"\Q\xEF\E"#, replacement: "literal"),
+            ])
+        )
+        let literalPatternScalar = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "left", replacement: #"\x80"#),
+                SubstitutionRule(pattern: "right", replacement: "same"),
+                SubstitutionRule(pattern: "\u{F0000}", replacement: "same"),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: literalPatternScalar).differences, 1)
+        XCTAssertThrowsError(try LineDiff.compare(
+            left: "\u{F0000}",
+            right: "byte",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "byte", replacement: #"\x80"#),
+                SubstitutionRule(pattern: #"\x{F0000}"#, replacement: "private"),
+            ])
+        )) { error in
+            XCTAssertEqual(error as? LineDiffError, .invalidRegularExpression(#"\x{F0000}"#))
+        }
+    }
+
+    func testRawByteSubstitutionsUsePcreByteClassesAndProperties() throws {
+        let byteRange = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "left", replacement: #"\x80"#),
+                SubstitutionRule(pattern: "right", replacement: #"\x81"#),
+                SubstitutionRule(pattern: #"[\x80-\x81]"#, replacement: "same"),
+            ])
+        )
+        let privateUseProperty = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "left", replacement: #"\x80"#),
+                SubstitutionRule(pattern: "right", replacement: "private"),
+                SubstitutionRule(pattern: #"\p{Co}"#, replacement: "private"),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: byteRange).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: privateUseProperty).differences, 1)
+    }
+
+    func testSubstitutionEngineMatchesWinMergePcreSemantics() throws {
+        let crAnchors = try LineDiff.compare(
+            left: "value=left\rnext",
+            right: "value=right\rnext",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: #"^value=.*$"#, replacement: "same"),
+            ])
+        )
+        let emptyRule = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "", replacement: "same"),
+            ])
+        )
+        let terminalEmptyMatch = try LineDiff.compare(
+            left: "same",
+            right: "same!",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "$", replacement: "!"),
+            ])
+        )
+        let pcreReset = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: #"(?:left|right)\K"#, replacement: "same"),
+            ])
+        )
+        let partialHex = try LineDiff.compare(
+            left: "left",
+            right: "right",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: "left", replacement: #"\x1G"#),
+                SubstitutionRule(pattern: "right", replacement: #"\x01"#),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: crAnchors).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: emptyRule).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: terminalEmptyMatch).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: pcreReset).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: partialHex).differences, 0)
+    }
+
+    func testUnmatchedCaptureStopsCurrentRuleAfterEarlierMatches() throws {
+        let rows = try LineDiff.compare(
+            left: "a a",
+            right: "x a",
+            options: LineDiffOptions(substitutions: [
+                SubstitutionRule(pattern: #"(a)|(b)"#, replacement: #"\2"#),
+            ])
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rows).differences, 1)
+    }
+
     func testComparisonFiltersRejectInvalidOrStructuralReplacements() throws {
         XCTAssertThrowsError(try LineDiff.compare(
             left: "left",
@@ -427,8 +556,15 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "sql"), .sql)
         XCTAssertEqual(CommentSyntax(fileExtension: "xml"), .markup)
         XCTAssertEqual(CommentSyntax(fileExtension: "html"), .markup)
-        XCTAssertNil(CommentSyntax(fileExtension: "m"))
-        XCTAssertNil(CommentSyntax(fileExtension: "yaml"))
+        XCTAssertEqual(CommentSyntax(fileExtension: "m"), .matlab)
+        XCTAssertEqual(CommentSyntax(fileExtension: "properties"), .properties)
+        XCTAssertEqual(CommentSyntax(fileExtension: "toml"), .toml)
+        XCTAssertEqual(CommentSyntax(fileExtension: "yaml"), .yaml)
+        XCTAssertEqual(CommentSyntax(fileExtension: "vb"), .basic)
+        XCTAssertEqual(CommentSyntax(fileExtension: "css"), .css)
+        XCTAssertEqual(CommentSyntax(fileExtension: "ini"), .ini)
+        XCTAssertEqual(CommentSyntax(fileExtension: "tex"), .tex)
+        XCTAssertEqual(CommentSyntax(fileExtension: "vhdl"), .adaVhdl)
         XCTAssertNil(CommentSyntax(fileExtension: "txt"))
     }
 
@@ -498,6 +634,172 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
         XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
         XCTAssertEqual(DiffSummary(rows: prose).differences, 0)
+    }
+
+    func testMatlabCommentsPreserveStringsAndTransposeOperators() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .matlab)
+        let comments = try LineDiff.compare(
+            left: "value = data'; % left\n%{\nold\n%}",
+            right: "value = data'; % right\n%{\nnew\nextra\n%}",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "value = '% left';",
+            right: "value = '% right';",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+    }
+
+    func testPropertiesCommentsRequireLogicalLineStart() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .properties)
+        let comments = try LineDiff.compare(
+            left: "  # left\n! old\nkey=value#left",
+            right: "  # right\n! new\nkey=value#right",
+            options: options
+        )
+        let continuation = try LineDiff.compare(
+            left: "key=value\\\n  # left",
+            right: "key=value\\\n  # right",
+            options: options
+        )
+        let nonBreakingSpace = try LineDiff.compare(
+            left: "\u{00A0}#left",
+            right: "\u{00A0}#right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: continuation).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: nonBreakingSpace).differences, 1)
+    }
+
+    func testTomlCommentsPreserveSingleAndMultilineStrings() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .toml)
+        let comments = try LineDiff.compare(
+            left: "key = 1 # left",
+            right: "key = 1 # right",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "key = '# left'",
+            right: "key = '# right'",
+            options: options
+        )
+        let multiline = try LineDiff.compare(
+            left: "key = \"\"\"\n# left\n\"\"\"",
+            right: "key = \"\"\"\n# right\n\"\"\"",
+            options: options
+        )
+        let escapedTriple = try LineDiff.compare(
+            left: "key = \"\"\"escaped \\\"\"\" # left\nend\"\"\"",
+            right: "key = \"\"\"escaped \\\"\"\" # right\nend\"\"\"",
+            options: options
+        )
+        let fiveQuoteEnding = try LineDiff.compare(
+            left: "key = \"\"\"value\"\"\"\"\" # left",
+            right: "key = \"\"\"value\"\"\"\"\" # right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: multiline).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: escapedTriple).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: fiveQuoteEnding).differences, 0)
+    }
+
+    func testYamlCommentsPreserveScalarsAndUrlFragments() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .yaml)
+        let comments = try LineDiff.compare(
+            left: "key: value # left",
+            right: "key: value # right",
+            options: options
+        )
+        let url = try LineDiff.compare(
+            left: "url: https://host/#left",
+            right: "url: https://host/#right",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "key: \"first\n# left\nlast\"",
+            right: "key: \"first\n# right\nlast\"",
+            options: options
+        )
+        let block = try LineDiff.compare(
+            left: "key: |\n  # left",
+            right: "key: |\n  # right",
+            options: options
+        )
+        let plainApostrophe = try LineDiff.compare(
+            left: "key: can't # left",
+            right: "key: can't # right",
+            options: options
+        )
+        let nonBreakingSpace = try LineDiff.compare(
+            left: "key: value\u{00A0}#left",
+            right: "key: value\u{00A0}#right",
+            options: options
+        )
+        let trailingIndicator = try LineDiff.compare(
+            left: "key: value|\n# left",
+            right: "key: value|\n# right",
+            options: options
+        )
+        let taggedBlock = try LineDiff.compare(
+            left: "picture: !!binary |\n  # left",
+            right: "picture: !!binary |\n  # right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: url).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: block).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: plainApostrophe).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: nonBreakingSpace).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: trailingIndicator).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: taggedBlock).differences, 1)
+    }
+
+    func testBasicCssIniTexAndAdaVhdlCommentFamilies() throws {
+        let fixtures: [(CommentSyntax, String, String)] = [
+            (.basic, "value = 1 ' left", "value = 1 ' right"),
+            (.css, "value { /* left */ color: red; }", "value { /* right */ color: red; }"),
+            (.ini, "  ; left", "  ; right"),
+            (.tex, "value % left", "value % right"),
+            (.adaVhdl, "value := 1; -- left", "value := 1; -- right"),
+        ]
+        for (syntax, left, right) in fixtures {
+            let rows = try LineDiff.compare(
+                left: left,
+                right: right,
+                options: LineDiffOptions(ignoreComments: true, commentSyntax: syntax)
+            )
+            XCTAssertEqual(DiffSummary(rows: rows).differences, 0, "Syntax: \(syntax)")
+        }
+
+        let basicString = try LineDiff.compare(
+            left: #"value = "' left""#,
+            right: #"value = "' right""#,
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .basic)
+        )
+        let inlineIni = try LineDiff.compare(
+            left: "value=left;still-value",
+            right: "value=right;still-value",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .ini)
+        )
+        let texString = try LineDiff.compare(
+            left: #"value = "% left""#,
+            right: #"value = "% right""#,
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .tex)
+        )
+
+        XCTAssertEqual(DiffSummary(rows: basicString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: inlineIni).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: texString).differences, 1)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {

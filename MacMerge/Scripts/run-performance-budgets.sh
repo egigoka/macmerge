@@ -7,17 +7,24 @@ fixture_dir=${FIXTURE_DIR:-"${TMPDIR:-/tmp}/macmerge-performance-$$"}
 report=${REPORT_PATH:-"$package_root/dist/performance-report.json"}
 app="$package_root/dist/MacMerge.app"
 line_count=${LINE_COUNT:-1000000}
+density=${FIXTURE_DENSITY:-sparse}
 load_budget_ms=${LOAD_BUDGET_MS:-5000}
 comparison_budget_ms=${COMPARISON_BUDGET_MS:-5000}
 first_render_budget_ms=${FIRST_RENDER_BUDGET_MS:-1500}
 scroll_budget_ms=${SCROLL_BUDGET_MS:-1500}
 resident_budget_mib=${RESIDENT_BUDGET_MIB:-900}
 pid=""
+launcher_pid=""
+existing_pids=""
 
 cleanup() {
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
+    fi
+    if [[ -n "$launcher_pid" ]] && kill -0 "$launcher_pid" 2>/dev/null; then
+        kill "$launcher_pid" 2>/dev/null || true
+        wait "$launcher_pid" 2>/dev/null || true
     fi
     rm -rf "$fixture_dir"
 }
@@ -34,14 +41,31 @@ swift run \
     --configuration release \
     MacMergeBenchmark \
     --lines "$line_count" \
+    --density "$density" \
     --fixture-directory "$fixture_dir" >/dev/null
 
 left="$fixture_dir/macmerge-$line_count-left.txt"
 right="$fixture_dir/macmerge-$line_count-right.txt"
-MACMERGE_PERFORMANCE_REPORT="$report" \
-MACMERGE_PERFORMANCE_AUTOSCROLL=1 \
-"$app/Contents/MacOS/MacMerge" "$left" "$right" >/dev/null 2>&1 &
-pid=$!
+existing_pids=$(pgrep -f "^$app/Contents/MacOS/MacMerge$" || true)
+open -n -W -a "$app" \
+    --env "MACMERGE_PERFORMANCE_REPORT=$report" \
+    --env "MACMERGE_PERFORMANCE_AUTOSCROLL=1" \
+    "$left" "$right" >/dev/null 2>&1 &
+launcher_pid=$!
+for _ in {1..100}; do
+    pid=$(pgrep -f "^$app/Contents/MacOS/MacMerge$" | while read -r candidate; do
+        if ! grep -qx "$candidate" <<<"$existing_pids"; then
+            echo "$candidate"
+            break
+        fi
+    done) || true
+    if [[ -n "$pid" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$pid" ]]; then
+    echo "MacMerge did not launch." >&2
+    exit 1
+fi
 
 for _ in {1..600}; do
     if [[ -s "$report" ]] && [[ $(plutil -extract complete raw "$report" 2>/dev/null || true) == 1 ]]; then

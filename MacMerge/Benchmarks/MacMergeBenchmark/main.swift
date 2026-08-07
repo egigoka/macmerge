@@ -3,9 +3,15 @@ import Foundation
 import MacMergeCore
 
 private struct Configuration {
+    enum Density: String {
+        case sparse
+        case dense
+    }
+
     var lineCounts = [10_000, 100_000, 250_000, 1_000_000]
     var iterations = 1
     var fixtureDirectory: URL?
+    var density = Density.sparse
 
     init(arguments: ArraySlice<String>) throws {
         var index = arguments.startIndex
@@ -32,6 +38,12 @@ private struct Configuration {
                 index = arguments.index(after: index)
                 guard index < arguments.endIndex else { throw ArgumentError.missingValue(argument) }
                 fixtureDirectory = URL(filePath: arguments[index], directoryHint: .isDirectory)
+            case "--density":
+                index = arguments.index(after: index)
+                guard index < arguments.endIndex, let value = Density(rawValue: arguments[index]) else {
+                    throw ArgumentError.invalidValue(argument, index < arguments.endIndex ? arguments[index] : "")
+                }
+                density = value
             case "--help", "-h":
                 printUsage()
                 exit(EXIT_SUCCESS)
@@ -73,13 +85,13 @@ private struct Result {
     let residentDeltaBytes: Int64
 }
 
-private func fixture(lineCount: Int) -> Fixture {
+private func fixture(lineCount: Int, density: Configuration.Density) -> Fixture {
     var left = ""
     var right = ""
     let estimatedBytes = lineCount * 16
     left.reserveCapacity(estimatedBytes)
     right.reserveCapacity(estimatedBytes)
-    let changeStride = max(1, lineCount / 10)
+    let changeStride = density == .dense ? 1 : max(1, lineCount / 10)
     var differences = 0
 
     for line in 0..<lineCount {
@@ -100,8 +112,13 @@ private func fixture(lineCount: Int) -> Fixture {
     return Fixture(left: left, right: right, expectedDifferences: differences)
 }
 
-private func benchmark(lineCount: Int, iterations: Int, fixtureDirectory: URL?) throws -> Result {
-    let input = fixture(lineCount: lineCount)
+private func benchmark(
+    lineCount: Int,
+    iterations: Int,
+    fixtureDirectory: URL?,
+    density: Configuration.Density
+) throws -> Result {
+    let input = fixture(lineCount: lineCount, density: density)
     if let fixtureDirectory {
         try write(input, lineCount: lineCount, to: fixtureDirectory)
     }
@@ -297,6 +314,61 @@ private func validateComparisonSemantics() throws {
     guard DiffSummary(rows: rawByteLiteral).differences == 1 else {
         throw BenchmarkError.semanticCheckFailed("raw-byte literal collision")
     }
+    let chainedRawBytes = try LineDiff.compare(
+        left: "left",
+        right: "right",
+        options: LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: "left", replacement: #"\xEF"#),
+            SubstitutionRule(pattern: "right", replacement: #"\xEE"#),
+            SubstitutionRule(pattern: #"\xEF"#, replacement: "same"),
+            SubstitutionRule(pattern: #"\x{EE}"#, replacement: "same"),
+        ])
+    )
+    guard DiffSummary(rows: chainedRawBytes).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("chained raw-byte substitutions")
+    }
+    let rawByteLiteralPattern = try LineDiff.compare(
+        left: "left",
+        right: "right",
+        options: LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: "left", replacement: #"\x80"#),
+            SubstitutionRule(pattern: "right", replacement: "same"),
+            SubstitutionRule(pattern: "\u{F0000}", replacement: "same"),
+        ])
+    )
+    guard DiffSummary(rows: rawByteLiteralPattern).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("raw-byte literal-pattern collision")
+    }
+    let rawByteRange = try LineDiff.compare(
+        left: "left",
+        right: "right",
+        options: LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: "left", replacement: #"\x80"#),
+            SubstitutionRule(pattern: "right", replacement: #"\x81"#),
+            SubstitutionRule(pattern: #"[\x80-\x81]"#, replacement: "same"),
+        ])
+    )
+    guard DiffSummary(rows: rawByteRange).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("raw-byte pattern range")
+    }
+    let crAnchors = try LineDiff.compare(
+        left: "value=left\rnext",
+        right: "value=right\rnext",
+        options: LineDiffOptions(substitutions: [
+            SubstitutionRule(pattern: #"^value=.*$"#, replacement: "same"),
+        ])
+    )
+    guard DiffSummary(rows: crAnchors).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("PCRE ANYCRLF anchors")
+    }
+    let terminalEmptyMatch = try LineDiff.compare(
+        left: "same",
+        right: "same!",
+        options: LineDiffOptions(substitutions: [SubstitutionRule(pattern: "$", replacement: "!")])
+    )
+    guard DiffSummary(rows: terminalEmptyMatch).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("terminal empty substitution")
+    }
 
     let comments = try LineDiff.compare(
         left: "value(); // left\n/* old */",
@@ -310,6 +382,15 @@ private func validateComparisonSemantics() throws {
         ("value = 1 # left", "value = 1 # right", .hashLine, "hash-line comments"),
         ("SELECT 1; -- left", "SELECT 1; -- right", .sql, "SQL comments"),
         ("<root><!-- left --></root>", "<root><!-- right --></root>", .markup, "markup comments"),
+        ("value = 1; % left", "value = 1; % right", .matlab, "MATLAB comments"),
+        ("# left", "# right", .properties, "Properties comments"),
+        ("value = 1 # left", "value = 1 # right", .toml, "TOML comments"),
+        ("value: 1 # left", "value: 1 # right", .yaml, "YAML comments"),
+        ("value = 1 ' left", "value = 1 ' right", .basic, "Basic comments"),
+        ("a {/* left */ color:red}", "a {/* right */ color:red}", .css, "CSS comments"),
+        ("; left", "; right", .ini, "INI comments"),
+        ("value % left", "value % right", .tex, "TeX comments"),
+        ("value -- left", "value -- right", .adaVhdl, "Ada/VHDL comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -345,6 +426,22 @@ private func validateComparisonSemantics() throws {
     guard DiffSummary(rows: markupProse).differences == 0 else {
         throw BenchmarkError.semanticCheckFailed("markup prose")
     }
+    let tomlString = try LineDiff.compare(
+        left: "key = \"\"\"\n# left\n\"\"\"",
+        right: "key = \"\"\"\n# right\n\"\"\"",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .toml)
+    )
+    guard DiffSummary(rows: tomlString).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("TOML multiline strings")
+    }
+    let yamlBlock = try LineDiff.compare(
+        left: "key: |\n  # left",
+        right: "key: |\n  # right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .yaml)
+    )
+    guard DiffSummary(rows: yamlBlock).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("YAML block scalars")
+    }
 }
 
 private func residentMemoryBytes() -> UInt64 {
@@ -363,9 +460,9 @@ private func residentMemoryBytes() -> UInt64 {
 private func printUsage() {
     print("""
     Usage: MacMergeBenchmark [--lines 10000,100000,250000,1000000] [--iterations 1]
-                             [--fixture-directory PATH]
+                             [--fixture-directory PATH] [--density sparse|dense]
 
-    Runs deterministic sparse-edit comparisons and reports best elapsed time,
+    Runs deterministic text comparisons and reports best elapsed time,
     throughput, shallow DiffRow storage, and resident-memory growth.
     """)
 }
@@ -377,14 +474,16 @@ private func mebibytes(_ bytes: Int64) -> String {
 do {
     let configuration = try Configuration(arguments: CommandLine.arguments.dropFirst())
     try validateComparisonSemantics()
-    print("lines,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
+    print("density,lines,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
     for lineCount in configuration.lineCounts {
         let result = try benchmark(
             lineCount: lineCount,
             iterations: configuration.iterations,
-            fixtureDirectory: configuration.fixtureDirectory
+            fixtureDirectory: configuration.fixtureDirectory,
+            density: configuration.density
         )
         print([
+            configuration.density.rawValue,
             String(result.lines),
             mebibytes(Int64(result.inputBytes)),
             String(result.rows),

@@ -36,6 +36,11 @@ typedef struct mmx_diff_result {
     size_t count;
 } mmx_diff_result;
 
+typedef struct mmx_bytes_result {
+    uint8_t *bytes;
+    size_t size;
+} mmx_bytes_result;
+
 int32_t mmx_diff(
     const void *left,
     size_t left_size,
@@ -46,6 +51,20 @@ int32_t mmx_diff(
 );
 
 void mmx_diff_result_free(mmx_diff_result *result);
+
+int32_t mmx_regex_substitute(
+    const void *subject,
+    size_t subject_size,
+    const void *pattern,
+    size_t pattern_size,
+    const void *replacement,
+    size_t replacement_size,
+    int32_t case_sensitive,
+    size_t maximum_size,
+    mmx_bytes_result *result
+);
+
+void mmx_bytes_result_free(mmx_bytes_result *result);
 
 #if defined(DEBUG)
 /* Deterministic diagnostics used by sanitizer-backed allocation recovery tests. */

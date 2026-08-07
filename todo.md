@@ -36,7 +36,7 @@ Acceptance: user can open two files, apply individual changes in either directio
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
 - [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
-- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, allocation-free editable sentinel, and direct document-record comparison complete; 1M-row benchmark reduced shallow row storage from 83.9 to 53.4 MiB and resident growth from 537.8 to 376.3 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, allocation-free editable sentinel, direct document-record comparison, and compact ordered difference-row indices complete; shallow row storage is 53.4 MiB at 1M rows, packaged 1M sparse comparison uses 573 MiB total resident memory, and 250k all-different rows use 271 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -437,10 +437,10 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Multiline regex anchors for LF, CRLF, and CR.
 - [x] WinMerge capture references and supported replacement escapes.
 - [x] Reject substitutions that change line structure unexpectedly.
-- [-] Ignore comment differences persists and handles basic C-family line/block comments, WinMerge's legacy Perl/PO/PowerShell/Ruby/Shell/TCL hash-line parsers, Python triple-quoted strings, SQL `//`/`--`/`/* */`, and XML/HTML/SGML/Markdown `<!-- -->` comments while preserving covered code and quoted delimiters; C/C++ continuation, digit-separator/raw-string and C# verbatim-string corners, HTML embedded languages, MATLAB, Properties, TOML, YAML, and WinMerge's remaining syntax-parser families are pending.
+- [-] Ignore comment differences persists and handles basic C-family, legacy hash-line, Python, SQL, markup, MATLAB, Properties, TOML, YAML, Basic, CSS, INI, TeX, and Ada/VHDL parser families while preserving covered code and quoted delimiters; C/C++ continuation, digit-separator/raw-string and C# verbatim-string corners, HTML embedded languages, and WinMerge's remaining complex parser families are pending.
 - [x] Unequal filtered runs adjacent to real edits.
 - [x] Multiple overlapping line filters and substitutions with deterministic declared-order precedence.
-- [-] Raw-byte substitution escapes `0x80...0xFF` use bounded collision-free placeholders against source and replacement literals and exact bytes in native xdiff input; byte-oriented chained substitution behavior remains pending because later regex rules can still match placeholders.
+- [x] Raw-byte substitution escapes `0x80...0xFF` run through WinMerge-compatible bundled PCRE2 8-bit substitutions, remain matchable by later ordered regex rules including byte classes/ranges, and reach native xdiff as exact bytes without Unicode placeholders.
 - [ ] Regex invalidity, catastrophic-backtracking limits, cancellation, and memory bounds.
 
 ### Moved-block and intra-line tests
@@ -474,8 +474,8 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ### Performance and UI integration tests
 
-- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets with performance signposts; Instruments trace capture remains pending.
-- [ ] Benchmark extremely long lines, tabs, wide Unicode, and dense difference sets.
+- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets, and captures an Instruments trace when full Xcode provides `xctrace`; exported validation of completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals remains pending.
+- [-] Dense difference sets have deterministic core fixtures and packaged-harness support; extremely long lines, tabs, and wide Unicode remain pending.
 - [ ] Assert comparison and render metadata stay off the main actor.
 - [ ] Assert stale canceled comparisons cannot publish over newer input.
 - [ ] UI-test selection, First/Current/Last, Next/Previous, copy, copy-and-advance, Copy All, Undo, Redo, Refresh, and Save against core results.
@@ -494,7 +494,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 ## Milestone 7: Release engineering
 
 - [-] Add CI for tests, release builds, formatting, and static analysis (tests, strict builds, xdiff path coverage, and package artifact complete).
-- [-] Add performance and memory regression suites (deterministic xdiff allocation-failure sweep, CI Address Sanitizer, 10k-to-1M release comparison benchmarks, and packaged 1M-row UI/memory budgets complete; Instruments trace automation remains pending).
+- [-] Add performance and memory regression suites: deterministic xdiff allocation-failure sweep, CI Address Sanitizer, 10k-to-1M release comparison benchmarks, packaged 1M-row UI/memory budgets, and conditional full-Xcode Instruments trace artifacts exist; trace-interval export validation remains pending.
 - [ ] Add crash reporting and privacy documentation.
 - [ ] Configure sandbox entitlements and persistent security-scoped bookmarks.
 - [ ] Sign, notarize, package, and exercise updates on supported macOS versions.
@@ -502,8 +502,8 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Add Instruments trace automation for packaged 1M-row load and scrolling; continue reducing materialized row storage.
-2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (C-family comments, blank-line combinations, raw-byte substitutions, adjacent hunks, and overlapping-rule precedence complete).
+1. Continue reducing materialized 1M-row storage and benchmark dense differences and long lines.
+2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
 3. Expand CP932/CP51932/CP50220 coverage against Windows fixtures; keep unsupported mappings fail-closed.
 4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
 5. Expand into directory comparison after text-core behavior is fixture-compatible.

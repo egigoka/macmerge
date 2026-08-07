@@ -739,13 +739,12 @@ private struct ComparisonRenderResult: Sendable {
     let rows: [DiffRow]
     let maximumLineColumns: Int
     let differenceLocations: [DiffRow.ID: DifferenceLocation]
-    let differenceIDs: [DiffRow.ID]
+    let differenceRowIndices: [Int]
     let summary: DiffSummary
 }
 
 struct DifferenceLocation: Sendable {
     let rowIndex: Int
-    let position: Int
 }
 
 private actor ComparisonWorker {
@@ -767,7 +766,7 @@ private func computeComparison(
     let rows = try LineDiff.compare(left: left, right: right, options: options)
     var maximumLineColumns = 0
     var differenceLocations: [DiffRow.ID: DifferenceLocation] = [:]
-    var differenceIDs: [DiffRow.ID] = []
+    var differenceRowIndices: [Int] = []
     differenceLocations.reserveCapacity(rows.count / 4)
     for (index, row) in rows.enumerated() {
         maximumLineColumns = max(
@@ -776,18 +775,15 @@ private func computeComparison(
             row.right.map { displayColumnCount($0.text) } ?? 0
         )
         if row.kind != .unchanged {
-            differenceLocations[row.id] = DifferenceLocation(
-                rowIndex: index,
-                position: differenceIDs.count
-            )
-            differenceIDs.append(row.id)
+            differenceLocations[row.id] = DifferenceLocation(rowIndex: index)
+            differenceRowIndices.append(index)
         }
     }
     return ComparisonRenderResult(
         rows: rows,
         maximumLineColumns: maximumLineColumns,
         differenceLocations: differenceLocations,
-        differenceIDs: differenceIDs,
+        differenceRowIndices: differenceRowIndices,
         summary: DiffSummary(rows: rows)
     )
 }
@@ -868,7 +864,7 @@ final class ComparisonModel {
     }
     private(set) var maximumLineColumns = 0
     private(set) var differenceLocations: [DiffRow.ID: DifferenceLocation] = [:]
-    private(set) var differenceIDs: [DiffRow.ID] = []
+    private(set) var differenceRowIndices: [Int] = []
     private(set) var summary = DiffSummary(rows: [])
     private(set) var selectedDifferenceID: DiffRow.ID?
     private(set) var currentRowID: DiffRow.ID?
@@ -954,8 +950,10 @@ final class ComparisonModel {
     var canCreateEmptyComparison: Bool { !isWorking }
 
     var selectedDifferencePosition: Int? {
-        guard let selectedDifferenceID else { return nil }
-        return differenceLocations[selectedDifferenceID].map { $0.position + 1 }
+        guard let selectedDifferenceID,
+              let rowIndex = differenceLocations[selectedDifferenceID]?.rowIndex,
+              let position = orderedDifferencePosition(forRowIndex: rowIndex) else { return nil }
+        return position + 1
     }
 
     func isDirty(_ side: ComparisonSide) -> Bool {
@@ -979,7 +977,7 @@ final class ComparisonModel {
         rows = []
         maximumLineColumns = 0
         differenceLocations = [:]
-        differenceIDs = []
+        differenceRowIndices = []
         summary = DiffSummary(rows: [])
         selectedDifferenceID = nil
         currentRowID = nil
@@ -1324,11 +1322,12 @@ final class ComparisonModel {
     ) {
         commitActiveEditor()
         guard !isWorking, isComparisonCurrent else { return }
-        let currentDifferenceIDs = differenceIDs
+        let currentDifferenceRowIndices = differenceRowIndices
         let preferredDifferenceIndex: Int?
         if advancesToNextDifference,
-           let index = differenceLocations[rowID]?.position {
-            preferredDifferenceIndex = index == currentDifferenceIDs.count - 1 ? nil : index
+           let rowIndex = differenceLocations[rowID]?.rowIndex,
+           let index = orderedDifferencePosition(forRowIndex: rowIndex) {
+            preferredDifferenceIndex = index == currentDifferenceRowIndices.count - 1 ? nil : index
         } else {
             preferredDifferenceIndex = nil
         }
@@ -1472,7 +1471,7 @@ final class ComparisonModel {
 
     func selectFirstDifference() {
         guard !isWorking else { return }
-        selectedDifferenceID = differenceIDs.first
+        selectedDifferenceID = differenceID(at: differenceRowIndices.startIndex)
         currentRowID = selectedDifferenceID
     }
 
@@ -1491,7 +1490,7 @@ final class ComparisonModel {
 
     func selectLastDifference() {
         guard !isWorking else { return }
-        selectedDifferenceID = differenceIDs.last
+        selectedDifferenceID = differenceRowIndices.indices.last.flatMap(differenceID(at:))
         currentRowID = selectedDifferenceID
     }
 
@@ -1681,7 +1680,7 @@ final class ComparisonModel {
             rows = []
             maximumLineColumns = 0
             differenceLocations = [:]
-            differenceIDs = []
+            differenceRowIndices = []
             summary = DiffSummary(rows: [])
             comparisonFailed = false
             return
@@ -1701,12 +1700,12 @@ final class ComparisonModel {
                     rows = comparison.rows
                     maximumLineColumns = comparison.maximumLineColumns
                     differenceLocations = comparison.differenceLocations
-                    differenceIDs = comparison.differenceIDs
+                    differenceRowIndices = comparison.differenceRowIndices
                     summary = comparison.summary
                     comparisonFailed = false
                     isComparisonCurrent = true
-                    if let index, !differenceIDs.isEmpty {
-                        selectedDifferenceID = differenceIDs[min(index, differenceIDs.count - 1)]
+                    if let index, !differenceRowIndices.isEmpty {
+                        selectedDifferenceID = differenceID(at: min(index, differenceRowIndices.count - 1))
                         currentRowID = selectedDifferenceID
                     } else if selectedDifferenceID.map({ differenceLocations[$0] == nil }) == true {
                         selectedDifferenceID = nil
@@ -1718,7 +1717,7 @@ final class ComparisonModel {
                     rows = []
                     maximumLineColumns = 0
                     differenceLocations = [:]
-                    differenceIDs = []
+                    differenceRowIndices = []
                     summary = DiffSummary(rows: [])
                     comparisonFailed = true
                     isComparisonCurrent = false
@@ -1762,7 +1761,7 @@ final class ComparisonModel {
                 rows = comparison.rows
                 maximumLineColumns = comparison.maximumLineColumns
                 differenceLocations = comparison.differenceLocations
-                differenceIDs = comparison.differenceIDs
+                differenceRowIndices = comparison.differenceRowIndices
                 summary = comparison.summary
                 comparisonFailed = false
                 isComparisonCurrent = true
@@ -1773,7 +1772,7 @@ final class ComparisonModel {
                 rows = []
                 maximumLineColumns = 0
                 differenceLocations = [:]
-                differenceIDs = []
+                differenceRowIndices = []
                 summary = DiffSummary(rows: [])
                 comparisonFailed = true
                 isComparisonCurrent = false
@@ -1797,7 +1796,7 @@ final class ComparisonModel {
 
     private func selectAdjacentDifference(offset: Int) {
         guard !isWorking else { return }
-        guard !differenceIDs.isEmpty else {
+        guard !differenceRowIndices.isEmpty else {
             selectedDifferenceID = nil
             return
         }
@@ -1807,23 +1806,49 @@ final class ComparisonModel {
     }
 
     private func adjacentDifferenceID(offset: Int) -> DiffRow.ID? {
-        guard !differenceIDs.isEmpty else { return nil }
+        guard !differenceRowIndices.isEmpty else { return nil }
         guard let originID = selectedDifferenceID ?? currentRowID else {
-            return offset > 0 ? differenceIDs.first : differenceIDs.last
+            let position = offset > 0 ? differenceRowIndices.startIndex : differenceRowIndices.index(before: differenceRowIndices.endIndex)
+            return differenceID(at: position)
         }
-        if let position = differenceLocations[originID]?.position {
+        if let rowIndex = differenceLocations[originID]?.rowIndex,
+           let position = orderedDifferencePosition(forRowIndex: rowIndex) {
             let nextPosition = position + offset
-            return differenceIDs.indices.contains(nextPosition) ? differenceIDs[nextPosition] : nil
+            return differenceID(at: nextPosition)
         }
         guard let rowIndex = rows.firstIndex(where: { $0.id == originID }) else { return nil }
+        let insertion = differenceInsertionIndex(forRowIndex: rowIndex)
         if offset > 0 {
-            return differenceIDs.first(where: {
-                (differenceLocations[$0]?.rowIndex ?? -1) > rowIndex
-            })
+            return differenceID(at: insertion)
         }
-        return differenceIDs.last(where: {
-            (differenceLocations[$0]?.rowIndex ?? .max) < rowIndex
-        })
+        return insertion > 0 ? differenceID(at: insertion - 1) : nil
+    }
+
+    private func differenceID(at position: Int) -> DiffRow.ID? {
+        guard differenceRowIndices.indices.contains(position) else { return nil }
+        let rowIndex = differenceRowIndices[position]
+        return rows.indices.contains(rowIndex) ? rows[rowIndex].id : nil
+    }
+
+    private func orderedDifferencePosition(forRowIndex rowIndex: Int) -> Int? {
+        let position = differenceInsertionIndex(forRowIndex: rowIndex)
+        return differenceRowIndices.indices.contains(position) && differenceRowIndices[position] == rowIndex
+            ? position
+            : nil
+    }
+
+    private func differenceInsertionIndex(forRowIndex rowIndex: Int) -> Int {
+        var lower = differenceRowIndices.startIndex
+        var upper = differenceRowIndices.endIndex
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if differenceRowIndices[middle] < rowIndex {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        return lower
     }
 
     private var currentDifferenceID: DiffRow.ID? {
@@ -3007,6 +3032,7 @@ private struct DiffTableView: NSViewRepresentable {
         private var isSynchronizingSelection = false
         private var pendingEditorFocus: PendingEditorFocus?
         private var firstVisibleRowSignpostID: OSSignpostID?
+        private var autoScrollSignpostID: OSSignpostID?
         private var didAutoScroll = false
 
         private struct PendingEditorFocus {
@@ -3134,10 +3160,15 @@ private struct DiffTableView: NSViewRepresentable {
                 PerformanceProbe.shared.end("first_render")
                 guard PerformanceProbe.shared.shouldAutoScroll, !self.didAutoScroll else { return }
                 self.didAutoScroll = true
+                self.autoScrollSignpostID = PerformanceTrace.begin("AutoScroll")
                 PerformanceProbe.shared.begin("scroll")
                 tableView.scrollRowToVisible(tableView.numberOfRows - 1)
                 tableView.layoutSubtreeIfNeeded()
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    if let id = self?.autoScrollSignpostID {
+                        PerformanceTrace.end("AutoScroll", id: id)
+                        self?.autoScrollSignpostID = nil
+                    }
                     PerformanceProbe.shared.finishScroll()
                 }
             }
