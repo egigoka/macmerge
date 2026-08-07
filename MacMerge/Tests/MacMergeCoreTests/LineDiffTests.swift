@@ -549,6 +549,35 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: removed).differences, 0)
     }
 
+    func testWholeCommentLinesMatchWinMergeEolAndColumnRules() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+        let columnZero = try LineDiff.compare(
+            left: "head\n// comment\ntail\n",
+            right: "head\ntail\n",
+            options: options
+        )
+        let indented = try LineDiff.compare(
+            left: "head\n  // comment\ntail\n",
+            right: "head\ntail\n",
+            options: options
+        )
+        let unterminated = try LineDiff.compare(
+            left: "head\n// comment",
+            right: "head\n",
+            options: options
+        )
+        let blankInBlock = try LineDiff.compare(
+            left: "head\n/* comment\n\n*/\ntail\n",
+            right: "head\n/* comment\n*/\ntail\n",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: columnZero).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: indented).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: unterminated).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: blankInBlock).differences, 1)
+    }
+
     func testCommentSyntaxUsesWinMergeExtensionFamilies() {
         XCTAssertEqual(CommentSyntax(fileExtension: "CPP"), .cFamily)
         XCTAssertEqual(CommentSyntax(fileExtension: "sh"), .hashLine)
@@ -565,6 +594,20 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "ini"), .ini)
         XCTAssertEqual(CommentSyntax(fileExtension: "tex"), .tex)
         XCTAssertEqual(CommentSyntax(fileExtension: "vhdl"), .adaVhdl)
+        XCTAssertEqual(CommentSyntax(fileExtension: "JS"), .cFamily)
+        XCTAssertEqual(CommentSyntax(fileExtension: "json"), .cFamily)
+        XCTAssertEqual(CommentSyntax(fileExtension: "rul"), .cFamily)
+        XCTAssertEqual(CommentSyntax(fileExtension: "dcc"), .dcl)
+        XCTAssertEqual(CommentSyntax(fileExtension: "rexx"), .rexx)
+        XCTAssertEqual(CommentSyntax(fileExtension: "scm"), .lispSiod)
+        XCTAssertEqual(CommentSyntax(fileExtension: "F90"), .fortran)
+        XCTAssertEqual(CommentSyntax(fileExtension: "nsh"), .nsis)
+        XCTAssertEqual(CommentSyntax(fileExtension: "rc2"), .resources)
+        XCTAssertEqual(CommentSyntax(fileExtension: "vh"), .verilog)
+        XCTAssertEqual(CommentSyntax(fileExtension: "cmd"), .batch)
+        XCTAssertNil(CommentSyntax(fileExtension: "mjs"))
+        XCTAssertNil(CommentSyntax(fileExtension: "f95"))
+        XCTAssertNil(CommentSyntax(fileExtension: "sv"))
         XCTAssertNil(CommentSyntax(fileExtension: "txt"))
     }
 
@@ -800,6 +843,185 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: basicString).differences, 1)
         XCTAssertEqual(DiffSummary(rows: inlineIni).differences, 1)
         XCTAssertEqual(DiffSummary(rows: texString).differences, 1)
+    }
+
+    func testJavaScriptJsonAndInstallShieldUseLegacyCFamilyScanner() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+        let jsonComment = try LineDiff.compare(
+            left: #"{"value": 1} // left"#,
+            right: #"{"value": 1} // right"#,
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: #"const value = "https://left";"#,
+            right: #"const value = "https://right";"#,
+            options: options
+        )
+        let templateLiteral = try LineDiff.compare(
+            left: "const value = `https://left`;",
+            right: "const value = `https://right`;",
+            options: options
+        )
+        let continuedComment = try LineDiff.compare(
+            left: "// old\\\nleft continuation\nend",
+            right: "// new\\\nright continuation\nend",
+            options: options
+        )
+        let preprocessorOverlap = try LineDiff.compare(
+            left: "#/*/ left",
+            right: "#/*/ right",
+            options: options
+        )
+        let carriedQuote = try LineDiff.compare(
+            left: "\"start\\\n\"# \"http://left\"",
+            right: "\"start\\\n\"# \"http://right\"",
+            options: options
+        )
+        let inheritedBlock = try LineDiff.compare(
+            left: "/* comment\n*/#/*/ left",
+            right: "/* comment\n*/#/*/ right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: jsonComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: templateLiteral).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: continuedComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: preprocessorOverlap).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: carriedQuote).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: inheritedBlock).differences, 1)
+    }
+
+    func testDclAndRexxCommentContinuationMatchesCrystalEdit() throws {
+        let dcl = try LineDiff.compare(
+            left: "// old\\\nleft continuation\n/* old */ end",
+            right: "// new\\\nright continuation\n/* new */ end",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .dcl)
+        )
+        let rexx = try LineDiff.compare(
+            left: "// old\\\nleft continuation\n/* old */ end",
+            right: "// new\\\nright continuation\n/* new */ end",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .rexx)
+        )
+
+        XCTAssertEqual(DiffSummary(rows: dcl).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: rexx).differences, 0)
+    }
+
+    func testLispAndSiodCommentDelimitersMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .lispSiod)
+        let comments = try LineDiff.compare(
+            left: "; left\n;| old\ncomment |; value",
+            right: "; right\n;| new\ncomment |; value",
+            options: options
+        )
+        let terminalSemicolon = try LineDiff.compare(
+            left: "head\n;\ntail\n",
+            right: "head\ntail\n",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "\"; left\"",
+            right: "\"; right\"",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: terminalSemicolon).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+    }
+
+    func testFortranCommentColumnsAndContinuationMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .fortran)
+        let comments = try LineDiff.compare(
+            left: "C left\nvalue = 1 ! old",
+            right: "c right\nvalue = 1 ! new",
+            options: options
+        )
+        let columnZeroCall = try LineDiff.compare(
+            left: "call left",
+            right: "call right",
+            options: options
+        )
+        let indentedCall = try LineDiff.compare(
+            left: " call left",
+            right: " call right",
+            options: options
+        )
+        let continuedComment = try LineDiff.compare(
+            left: "! old\\\nleft continuation\nend",
+            right: "! new\\\nright continuation\nend",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: columnZeroCall).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: indentedCall).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: continuedComment).differences, 0)
+    }
+
+    func testNsisResourcesAndVerilogCommentRulesMatchCrystalEdit() throws {
+        let nsisOptions = LineDiffOptions(ignoreComments: true, commentSyntax: .nsis)
+        let nsisSlash = try LineDiff.compare(
+            left: "value // left",
+            right: "value // right",
+            options: nsisOptions
+        )
+        let nsisSemicolon = try LineDiff.compare(
+            left: "value ; left",
+            right: "value ; right",
+            options: nsisOptions
+        )
+        let resourcePreprocessor = try LineDiff.compare(
+            left: #"#define URL "https://left""#,
+            right: #"#define URL "https://right""#,
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .resources)
+        )
+        let verilogContinuation = try LineDiff.compare(
+            left: "// old\\\nleft continuation\nend",
+            right: "// new\\\nright continuation\nend",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .verilog)
+        )
+
+        XCTAssertEqual(DiffSummary(rows: nsisSlash).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: nsisSemicolon).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: resourcePreprocessor).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: verilogContinuation).differences, 1)
+    }
+
+    func testBatchCommentRecognitionMatchesCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .batch)
+        let rem = try LineDiff.compare(
+            left: "  REM left",
+            right: "  rem right",
+            options: options
+        )
+        let atRem = try LineDiff.compare(
+            left: "@REM left",
+            right: "@REM right",
+            options: options
+        )
+        let doubleColon = try LineDiff.compare(
+            left: "::left",
+            right: "::right",
+            options: options
+        )
+        let bareDoubleColon = try LineDiff.compare(
+            left: "head\n::\ntail\n",
+            right: "head\ntail\n",
+            options: options
+        )
+        let utf16Colon = try LineDiff.compare(
+            left: ":!\u{0301}left",
+            right: ":!\u{0301}right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: rem).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: atRem).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: doubleColon).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: bareDoubleColon).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: utf16Colon).differences, 0)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {

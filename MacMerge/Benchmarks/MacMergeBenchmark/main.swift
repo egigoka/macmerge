@@ -391,6 +391,14 @@ private func validateComparisonSemantics() throws {
         ("; left", "; right", .ini, "INI comments"),
         ("value % left", "value % right", .tex, "TeX comments"),
         ("value -- left", "value -- right", .adaVhdl, "Ada/VHDL comments"),
+        ("value // left", "value // right", .dcl, "DCL comments"),
+        ("value // left", "value // right", .rexx, "REXX comments"),
+        ("value ; left", "value ; right", .lispSiod, "Lisp/SIOD comments"),
+        ("value ! left", "value ! right", .fortran, "Fortran comments"),
+        ("value // left", "value // right", .nsis, "NSIS comments"),
+        ("value // left", "value // right", .resources, "Resource comments"),
+        ("value // left", "value // right", .verilog, "Verilog comments"),
+        ("REM left", "REM right", .batch, "Batch comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -417,6 +425,70 @@ private func validateComparisonSemantics() throws {
     )
     guard DiffSummary(rows: removedComment).differences == 0 else {
         throw BenchmarkError.semanticCheckFailed("comment removal")
+    }
+    let wholeCommentLine = try LineDiff.compare(
+        left: "head\n// comment\ntail\n",
+        right: "head\ntail\n",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+    )
+    let indentedCommentLine = try LineDiff.compare(
+        left: "head\n  // comment\ntail\n",
+        right: "head\ntail\n",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+    )
+    guard DiffSummary(rows: wholeCommentLine).differences == 0,
+          DiffSummary(rows: indentedCommentLine).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("whole comment line classification")
+    }
+    let blankInBlock = try LineDiff.compare(
+        left: "head\n/* comment\n\n*/\ntail\n",
+        right: "head\n/* comment\n*/\ntail\n",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+    )
+    guard DiffSummary(rows: blankInBlock).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("blank line in comment block")
+    }
+    let rexxContinuation = try LineDiff.compare(
+        left: "// old\\\nleft continuation\nend",
+        right: "// new\\\nright continuation\nend",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .rexx)
+    )
+    let verilogContinuation = try LineDiff.compare(
+        left: "// old\\\nleft continuation\nend",
+        right: "// new\\\nright continuation\nend",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .verilog)
+    )
+    guard DiffSummary(rows: rexxContinuation).differences == 0,
+          DiffSummary(rows: verilogContinuation).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("comment continuation")
+    }
+    let preprocessorOverlap = try LineDiff.compare(
+        left: "#/*/ left",
+        right: "#/*/ right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .cFamily)
+    )
+    guard DiffSummary(rows: preprocessorOverlap).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("preprocessor comment overlap")
+    }
+    let nsisSemicolon = try LineDiff.compare(
+        left: "value ; left",
+        right: "value ; right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .nsis)
+    )
+    let batchAtRem = try LineDiff.compare(
+        left: "@REM left",
+        right: "@REM right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .batch)
+    )
+    let batchUtf16Colon = try LineDiff.compare(
+        left: ":!\u{0301}left",
+        right: ":!\u{0301}right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .batch)
+    )
+    guard DiffSummary(rows: nsisSemicolon).differences == 1,
+          DiffSummary(rows: batchAtRem).differences == 1,
+          DiffSummary(rows: batchUtf16Colon).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("legacy parser anomalies")
     }
     let markupProse = try LineDiff.compare(
         left: "don't <!-- left --> change",

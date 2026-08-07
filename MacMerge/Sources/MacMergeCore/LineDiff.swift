@@ -37,11 +37,19 @@ public enum CommentSyntax: Equatable, Sendable {
     case ini
     case tex
     case adaVhdl
+    case dcl
+    case rexx
+    case lispSiod
+    case fortran
+    case nsis
+    case resources
+    case verilog
+    case batch
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
         case "c", "cc", "cpp", "cppm", "ixx", "cxx", "h", "hm", "hpp", "hxx", "inl", "rh", "tlh",
-             "tli", "xs", "cs", "java", "jav":
+             "tli", "xs", "cs", "java", "jav", "js", "json", "rul":
             self = .cFamily
         case "pl", "pm", "plx", "po", "pot", "ps1", "psm1", "psd1", "rb", "rbw", "rake", "gemspec",
              "sh", "conf", "tcl":
@@ -68,6 +76,22 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .tex
         case "ads", "adb", "vhd", "vhdl", "vho":
             self = .adaVhdl
+        case "dcl", "dcc":
+            self = .dcl
+        case "rex", "rexx":
+            self = .rexx
+        case "lsp", "dsl", "scm":
+            self = .lispSiod
+        case "f", "f90", "f9p", "fpp", "for", "f77":
+            self = .fortran
+        case "nsi", "nsh":
+            self = .nsis
+        case "rc", "dlg", "r16", "r32", "rc2":
+            self = .resources
+        case "v", "vh":
+            self = .verilog
+        case "bat", "btm", "cmd":
+            self = .batch
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -825,6 +849,42 @@ private struct ComparisonTransform {
     ) -> CommentFilteredContents? {
         guard let commentSyntax else { return nil }
         switch commentSyntax {
+        case .cFamily:
+            return legacyCLikeCommentFilteredContents(
+                in: document,
+                carriesEscapedState: true,
+                preprocessorMarker: "#"
+            )
+        case .dcl:
+            return legacyCLikeCommentFilteredContents(in: document, carriesEscapedState: false)
+        case .rexx:
+            return legacyCLikeCommentFilteredContents(in: document, carriesEscapedState: true)
+        case .lispSiod:
+            return lispCommentFilteredContents(in: document)
+        case .fortran:
+            return fortranCommentFilteredContents(in: document)
+        case .nsis:
+            return legacyCLikeCommentFilteredContents(
+                in: document,
+                carriesEscapedState: true,
+                preprocessorMarker: "!"
+            )
+        case .resources:
+            return legacyCLikeCommentFilteredContents(
+                in: document,
+                carriesEscapedState: true,
+                preprocessorMarker: "#",
+                singleQuoteUsesTwoLookback: false
+            )
+        case .verilog:
+            return legacyCLikeCommentFilteredContents(
+                in: document,
+                carriesEscapedState: false,
+                preprocessorMarker: "`",
+                supportsSingleQuote: false
+            )
+        case .batch:
+            return batchCommentFilteredContents(in: document)
         case .matlab:
             return matlabCommentFilteredContents(in: document)
         case .properties:
@@ -850,10 +910,6 @@ private struct ComparisonTransform {
         let blockDelimiter: (start: String, end: String)?
         let supportsTripleQuotedStrings: Bool
         switch commentSyntax {
-        case .cFamily:
-            lineDelimiters = ["//"]
-            blockDelimiter = ("/*", "*/")
-            supportsTripleQuotedStrings = false
         case .hashLine:
             lineDelimiters = ["#"]
             blockDelimiter = nil
@@ -870,7 +926,8 @@ private struct ComparisonTransform {
             lineDelimiters = []
             blockDelimiter = ("<!--", "-->")
             supportsTripleQuotedStrings = false
-        case .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl:
+        case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
+             .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
@@ -963,9 +1020,299 @@ private struct ComparisonTransform {
             }
 
             contents.append(output)
-            commentOnly.append(
-                containedComment && output.unicodeScalars.allSatisfy { $0 == " " || $0 == "\t" }
-            )
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func legacyCLikeCommentFilteredContents(
+        in document: TextDocument,
+        carriesEscapedState: Bool,
+        preprocessorMarker: Character? = nil,
+        supportsSingleQuote: Bool = true,
+        singleQuoteUsesTwoLookback: Bool = true
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        var inLineComment = false
+        var inPreprocessor = false
+        var quote: Character?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            if record.content.isEmpty {
+                let containedComment = inBlockComment
+                contents.append("")
+                commentOnly.append(Self.isWholeCommentLine(containedComment, output: "", record: record))
+                inLineComment = false
+                inPreprocessor = false
+                quote = nil
+                continue
+            }
+
+            var output = ""
+            var index = record.content.startIndex
+            var containedComment = inBlockComment || inLineComment
+            var firstToken = !inLineComment && !inPreprocessor && quote == nil
+
+            if inLineComment {
+                index = record.content.endIndex
+            }
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+                let remainder = record.content[index...]
+
+                if inBlockComment {
+                    containedComment = true
+                    if remainder.hasPrefix("*/") {
+                        inBlockComment = false
+                        index = record.content.index(index, offsetBy: 2)
+                    } else {
+                        index = nextIndex
+                    }
+                    continue
+                }
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    let closes = activeQuote == "'" && !singleQuoteUsesTwoLookback
+                        ? Self.oneLookbackQuoteCloses(in: record.content, at: index)
+                        : Self.twoLookbackQuoteCloses(in: record.content, at: index)
+                    if character == activeQuote, closes { quote = nil }
+                    index = nextIndex
+                    continue
+                }
+
+                if remainder.hasPrefix("//") {
+                    containedComment = true
+                    inLineComment = true
+                    break
+                }
+                if remainder.hasPrefix("/*") {
+                    containedComment = true
+                    if inPreprocessor, remainder.hasPrefix("/*/") {
+                        index = record.content.index(index, offsetBy: 3)
+                        continue
+                    }
+                    inBlockComment = true
+                    firstToken = false
+                    index = record.content.index(index, offsetBy: 2)
+                    continue
+                }
+                if !inPreprocessor, character == "\"" {
+                    quote = character
+                    output.append(character)
+                    index = nextIndex
+                    continue
+                }
+                if !inPreprocessor, supportsSingleQuote, character == "'",
+                   index == record.content.startIndex ||
+                   !Self.legacyIsAlphanumeric(record.content[record.content.index(before: index)]) {
+                    quote = character
+                    output.append(character)
+                    index = nextIndex
+                    continue
+                }
+                if !inPreprocessor, firstToken, character == preprocessorMarker {
+                    inPreprocessor = true
+                }
+                output.append(character)
+                if !character.isWhitespace { firstToken = false }
+                index = nextIndex
+            }
+
+            if !carriesEscapedState || record.content.last != "\\" {
+                inLineComment = false
+                inPreprocessor = false
+                quote = nil
+            }
+            contents.append(output)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func lispCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var quote: Character?
+            var containedComment = inBlockComment
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+                let remainder = record.content[index...]
+
+                if inBlockComment {
+                    containedComment = true
+                    if remainder.hasPrefix("|;") {
+                        inBlockComment = false
+                        index = record.content.index(index, offsetBy: 2)
+                    } else {
+                        index = nextIndex
+                    }
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+                if remainder.hasPrefix(";|") {
+                    containedComment = true
+                    inBlockComment = true
+                    index = record.content.index(index, offsetBy: 2)
+                    continue
+                }
+                if character == ";", nextIndex < record.content.endIndex {
+                    containedComment = true
+                    break
+                }
+                if character == "\"" || character == "'" && (
+                    index == record.content.startIndex ||
+                    !Self.legacyIsAlphanumeric(record.content[record.content.index(before: index)])
+                ) {
+                    quote = character
+                }
+                output.append(character)
+                index = nextIndex
+            }
+
+            contents.append(output)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func fortranCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inLineComment = false
+        var quote: Character?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            if record.content.isEmpty {
+                contents.append("")
+                commentOnly.append(false)
+                inLineComment = false
+                quote = nil
+                continue
+            }
+
+            var output = ""
+            var index = record.content.startIndex
+            var containedComment = inLineComment
+            if inLineComment { index = record.content.endIndex }
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
+                        quote = nil
+                    }
+                } else if character == "!" ||
+                          index == record.content.startIndex && (character == "C" || character == "c") {
+                    containedComment = true
+                    inLineComment = true
+                    break
+                } else {
+                    if character == "\"" || character == "'" && (
+                        index == record.content.startIndex ||
+                        !Self.legacyIsAlphanumeric(record.content[record.content.index(before: index)])
+                    ) {
+                        quote = character
+                    }
+                    output.append(character)
+                }
+                index = record.content.index(after: index)
+            }
+
+            if record.content.last != "\\" {
+                inLineComment = false
+                quote = nil
+            }
+            contents.append(output)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func batchCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            var output = ""
+            var index = record.content.startIndex
+            var quote: Character?
+            var firstToken = true
+            var containedComment = false
+
+            while index < record.content.endIndex {
+                let character = record.content[index]
+                let nextIndex = record.content.index(after: index)
+
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: record.content, at: index) {
+                        quote = nil
+                    }
+                    index = nextIndex
+                    continue
+                }
+                if character == "\"" || character == "'" && (
+                    index == record.content.startIndex ||
+                    !Self.legacyIsAlphanumeric(record.content[record.content.index(before: index)])
+                ) {
+                    quote = character
+                    output.append(character)
+                    index = nextIndex
+                    continue
+                }
+                if firstToken {
+                    let remainder = record.content[index...]
+                    if remainder.count >= 3,
+                       remainder.prefix(3).lowercased() == "rem" {
+                        let boundary = record.content.index(index, offsetBy: 3)
+                        if boundary == record.content.endIndex || record.content[boundary].isWhitespace {
+                            containedComment = true
+                            break
+                        }
+                    }
+                    let afterColon = record.content[nextIndex...].utf16
+                    if character == ":", afterColon.count > 1, let next = afterColon.first {
+                        if !Self.legacyIsAlphanumeric(next), !Self.legacyIsWhitespace(next) {
+                            containedComment = true
+                            break
+                        }
+                    }
+                }
+                output.append(character)
+                if !character.isWhitespace { firstToken = false }
+                index = nextIndex
+            }
+
+            contents.append(output)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1043,9 +1390,7 @@ private struct ComparisonTransform {
             }
 
             contents.append(output)
-            commentOnly.append(
-                !record.content.isEmpty && containedComment && output.allSatisfy { $0 == " " || $0 == "\t" }
-            )
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1065,7 +1410,7 @@ private struct ComparisonTransform {
             if isComment {
                 let leading = firstContent.map { String(record.content[..<$0]) } ?? ""
                 contents.append(leading)
-                commentOnly.append(true)
+                commentOnly.append(Self.isWholeCommentLine(true, output: leading, record: record))
                 continuesValue = false
             } else {
                 contents.append(record.content)
@@ -1157,7 +1502,7 @@ private struct ComparisonTransform {
             }
 
             contents.append(output)
-            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1264,7 +1609,7 @@ private struct ComparisonTransform {
                 pendingBlockScalar = (leadingSpaces, parsed)
             }
             contents.append(output)
-            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1299,6 +1644,24 @@ private struct ComparisonTransform {
         return text[text.index(before: previous)] == "\\"
     }
 
+    private static func oneLookbackQuoteCloses(in text: String, at index: String.Index) -> Bool {
+        index == text.startIndex || text[text.index(before: index)] != "\\"
+    }
+
+    private static func legacyIsAlphanumeric(_ character: Character) -> Bool {
+        character == "_" || character.unicodeScalars.contains { $0.value > 0x7F } ||
+            character.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) }
+    }
+
+    private static func legacyIsAlphanumeric(_ codeUnit: UInt16) -> Bool {
+        codeUnit > 0x7F || codeUnit == 0x5F ||
+            UnicodeScalar(codeUnit).map(CharacterSet.alphanumerics.contains) == true
+    }
+
+    private static func legacyIsWhitespace(_ codeUnit: UInt16) -> Bool {
+        UnicodeScalar(codeUnit).map(CharacterSet.whitespacesAndNewlines.contains) == true
+    }
+
     private func quotedLineCommentFilteredContents(
         in document: TextDocument,
         delimiter: Character,
@@ -1325,7 +1688,7 @@ private struct ComparisonTransform {
                 }
             }
             contents.append(output)
-            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1343,7 +1706,7 @@ private struct ComparisonTransform {
             if let range = record.content.range(of: delimiter) {
                 let output = String(record.content[..<range.lowerBound])
                 contents.append(output)
-                commentOnly.append(output.allSatisfy { $0 == " " || $0 == "\t" })
+                commentOnly.append(Self.isWholeCommentLine(true, output: output, record: record))
             } else {
                 contents.append(record.content)
                 commentOnly.append(false)
@@ -1387,7 +1750,7 @@ private struct ComparisonTransform {
                 index = record.content.index(after: index)
             }
             contents.append(output)
-            commentOnly.append(containedComment && output.allSatisfy { $0 == " " || $0 == "\t" })
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
@@ -1404,8 +1767,9 @@ private struct ComparisonTransform {
         for record in document.records {
             let firstContent = record.content.firstIndex { $0 != " " && $0 != "\t" }
             if let firstContent, delimiters.contains(record.content[firstContent]) {
-                contents.append(String(record.content[..<firstContent]))
-                commentOnly.append(true)
+                let output = String(record.content[..<firstContent])
+                contents.append(output)
+                commentOnly.append(Self.isWholeCommentLine(true, output: output, record: record))
             } else {
                 contents.append(record.content)
                 commentOnly.append(false)
@@ -1449,11 +1813,17 @@ private struct ComparisonTransform {
                 }
             }
             contents.append(output)
-            commentOnly.append(
-                !record.content.isEmpty && containedComment && output.allSatisfy { $0 == " " || $0 == "\t" }
-            )
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
         }
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func isWholeCommentLine(
+        _ containedComment: Bool,
+        output: String,
+        record: TextDocument.Record
+    ) -> Bool {
+        containedComment && !record.content.isEmpty && output.isEmpty && !record.terminator.isEmpty
     }
 
     private func collisionFreeMarker(left: String, right: String) -> String {

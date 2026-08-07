@@ -437,7 +437,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Multiline regex anchors for LF, CRLF, and CR.
 - [x] WinMerge capture references and supported replacement escapes.
 - [x] Reject substitutions that change line structure unexpectedly.
-- [-] Ignore comment differences persists and handles basic C-family, legacy hash-line, Python, SQL, markup, MATLAB, Properties, TOML, YAML, Basic, CSS, INI, TeX, and Ada/VHDL parser families while preserving covered code and quoted delimiters; C/C++ continuation, digit-separator/raw-string and C# verbatim-string corners, HTML embedded languages, and WinMerge's remaining complex parser families are pending.
+- [-] Ignore comment differences persists and handles C-family plus JavaScript/JSON/InstallShield, legacy hash-line, Python, SQL, markup, MATLAB, Properties, TOML, YAML, Basic, CSS, INI, TeX, Ada/VHDL, DCL, REXX, AutoLISP/SIOD, Fortran, NSIS, Resources, Verilog, and Batch parser families, including WinMerge's whole-comment-line, quote, column, and continuation quirks; C/C++ digit-separator/raw-string and C# verbatim-string corners, HTML embedded languages, and remaining ABAP/ASP/AutoIt/D/F#/Go/Inno Setup/Lua/Pascal/PHP/Rust/Smarty/TypeScript parser families are pending.
 - [x] Unequal filtered runs adjacent to real edits.
 - [x] Multiple overlapping line filters and substitutions with deterministic declared-order precedence.
 - [x] Raw-byte substitution escapes `0x80...0xFF` run through WinMerge-compatible bundled PCRE2 8-bit substitutions, remain matchable by later ordered regex rules including byte classes/ranges, and reach native xdiff as exact bytes without Unicode placeholders.
