@@ -51,6 +51,9 @@ public enum CommentSyntax: Equatable, Sendable {
     case dlang
     case go
     case rust
+    case abap
+    case autoIt
+    case fsharp
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
@@ -110,6 +113,12 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .go
         case "rs":
             self = .rust
+        case "abap":
+            self = .abap
+        case "au3":
+            self = .autoIt
+        case "fs", "fsx":
+            self = .fsharp
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -936,6 +945,12 @@ private struct ComparisonTransform {
             return goCommentFilteredContents(in: document)
         case .rust:
             return rustCommentFilteredContents(in: document)
+        case .abap:
+            return abapCommentFilteredContents(in: document)
+        case .autoIt:
+            return autoItCommentFilteredContents(in: document)
+        case .fsharp:
+            return fsharpCommentFilteredContents(in: document)
         case .matlab:
             return matlabCommentFilteredContents(in: document)
         case .properties:
@@ -979,7 +994,7 @@ private struct ComparisonTransform {
             supportsTripleQuotedStrings = false
         case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
              .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch, .pascal,
-             .lua, .innoSetup, .dlang, .go, .rust:
+             .lua, .innoSetup, .dlang, .go, .rust, .abap, .autoIt, .fsharp:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
@@ -2118,6 +2133,331 @@ private struct ComparisonTransform {
         }
     }
 
+    private func abapCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var lineComment = false
+        var inString = false
+        var inSection = false
+        var inVariable = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var containedComment = lineComment
+
+            if units.isEmpty {
+                lineComment = false
+                inString = false
+                inSection = false
+                inVariable = false
+            } else if lineComment { index = units.count }
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    output.append(contentsOf: units[index...])
+                    break
+                }
+                if inString {
+                    output.append(character)
+                    if character == 39, !inSection { inString = false }
+                    if character == 123 {
+                        inString = false
+                        inVariable = true
+                    }
+                    index += 1
+                    continue
+                }
+                if index == 0, character == 42 {
+                    containedComment = true
+                    lineComment = true
+                    break
+                }
+                if index > 0, units[index - 1] == 34 || character == 35 && units[index - 1] == 35 {
+                    containedComment = true
+                    lineComment = true
+                    if !output.isEmpty { output.removeLast() }
+                    break
+                }
+                if character == 39 || character == 124 {
+                    inString = true
+                    if character == 124 { inSection.toggle() }
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if inVariable, index > 0, units[index - 1] == 125 {
+                    inString = true
+                    inVariable = false
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                output.append(character)
+                index += 1
+            }
+
+            if units.last != 92 {
+                lineComment = false
+                inString = false
+                inSection = false
+                inVariable = false
+            }
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func autoItCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var quote: UInt16?
+            var atVariable = false
+            var dollarVariable = false
+            var preprocessor = false
+            var firstToken = true
+            var containedComment = inBlockComment
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if !inBlockComment { output.append(contentsOf: units[index...]) }
+                    break
+                }
+                if inBlockComment {
+                    containedComment = true
+                    if firstToken, let endLength = Self.autoItBlockEndLength(in: units, at: index) {
+                        inBlockComment = false
+                        index += endLength
+                        firstToken = false
+                    } else {
+                        if !Self.legacyIsWhitespace(character) { firstToken = false }
+                        index += 1
+                    }
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote { quote = nil }
+                    index += 1
+                    continue
+                }
+                if character == 59 {
+                    containedComment = true
+                    break
+                }
+                if preprocessor {
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if character == 64 {
+                    atVariable = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if atVariable {
+                    output.append(character)
+                    if !Self.legacyIsAlphanumeric(character) { atVariable = false }
+                    index += 1
+                    continue
+                }
+                if character == 36 {
+                    dollarVariable = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if dollarVariable {
+                    output.append(character)
+                    if !Self.legacyIsAlphanumeric(character) { dollarVariable = false }
+                    index += 1
+                    continue
+                }
+                if character == 34 || character == 39 {
+                    quote = character
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if firstToken, let startLength = Self.autoItBlockStartLength(in: units, at: index) {
+                    containedComment = true
+                    inBlockComment = true
+                    index += startLength
+                    firstToken = false
+                    continue
+                }
+                if firstToken, character == 35 {
+                    preprocessor = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                output.append(character)
+                if !Self.legacyIsWhitespace(character) { firstToken = false }
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func fsharpCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        var inRawString = false
+        var carriedLineComment = false
+        var carriedQuote: UInt16?
+        var carriedPreprocessor = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var quote = carriedQuote
+            var lineComment = carriedLineComment
+            var preprocessor = carriedPreprocessor
+            var rawTextEnd = -1
+            var commentEnd = -1
+            var firstToken = !lineComment && quote == nil && !preprocessor
+            var containedComment = inBlockComment || lineComment
+
+            if lineComment { index = units.count }
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if !inBlockComment { output.append(contentsOf: units[index...]) }
+                    break
+                }
+                if inBlockComment {
+                    containedComment = true
+                    if index + 1 < units.count, character == 42, units[index + 1] == 41 {
+                        inBlockComment = false
+                        commentEnd = index + 2
+                        index += 2
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: units, at: index) { quote = nil }
+                    index += 1
+                    continue
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                    containedComment = true
+                    lineComment = true
+                    break
+                }
+                if inRawString {
+                    output.append(character)
+                    if index >= 2, character == 34, units[index - 1] == 34, units[index - 2] == 34 {
+                        inRawString = false
+                        rawTextEnd = index + 2
+                    }
+                    index += 1
+                    continue
+                }
+                if index > rawTextEnd, index >= 2, character == 34,
+                   units[index - 1] == 34, units[index - 2] == 34 {
+                    inRawString = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if preprocessor {
+                    if index > commentEnd, index > 0, character == 42, units[index - 1] == 41 {
+                        if !output.isEmpty { output.removeLast() }
+                        containedComment = true
+                        inBlockComment = true
+                    } else {
+                        output.append(character)
+                    }
+                    index += 1
+                    continue
+                }
+                if !preprocessor, character == 34,
+                   (index < 2 || units[index - 1] != 34 || units[index - 2] != 34) ||
+                   !preprocessor && character == 39 &&
+                   (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                    quote = character
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if index + 1 > commentEnd, index + 1 < units.count,
+                   character == 40, units[index + 1] == 42 {
+                    containedComment = true
+                    inBlockComment = true
+                    index += 2
+                    continue
+                }
+                if firstToken, character == 35 { preprocessor = true }
+                output.append(character)
+                if !Self.legacyIsWhitespace(character) { firstToken = false }
+                index += 1
+            }
+
+            if units.last == 92 {
+                carriedLineComment = lineComment
+                carriedQuote = quote
+                carriedPreprocessor = preprocessor
+            } else {
+                carriedLineComment = false
+                carriedQuote = nil
+                carriedPreprocessor = false
+            }
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func autoItBlockStartLength(in units: [UInt16], at index: Int) -> Int? {
+        for token in ["#cs", "#CS", "#comments-start"] {
+            let tokenUnits = Array(token.utf16)
+            if index + tokenUnits.count <= units.count,
+               units[index..<(index + tokenUnits.count)].elementsEqual(tokenUnits) {
+                return tokenUnits.count
+            }
+        }
+        return nil
+    }
+
+    private static func autoItBlockEndLength(in units: [UInt16], at index: Int) -> Int? {
+        for token in ["#ce", "#CE", "#comments-end"] {
+            let tokenUnits = Array(token.utf16)
+            if index + tokenUnits.count <= units.count,
+               units[index..<(index + tokenUnits.count)].elementsEqual(tokenUnits) {
+                return tokenUnits.count
+            }
+        }
+        return nil
+    }
+
     private func matlabCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
         var contents: [String] = []
         var commentOnly: [Bool] = []
@@ -2447,6 +2787,14 @@ private struct ComparisonTransform {
 
     private static func twoLookbackQuoteCloses(in units: [UInt16], at index: Int) -> Bool {
         index == 0 || units[index - 1] != 92 || index >= 2 && units[index - 2] == 92
+    }
+
+    private static func twoLookbackQuoteCloses(
+        in units: [UInt16],
+        at index: Int,
+        escape: UInt16
+    ) -> Bool {
+        index == 0 || units[index - 1] != escape || index >= 2 && units[index - 2] == escape
     }
 
     private static func oneLookbackQuoteCloses(in text: String, at index: String.Index) -> Bool {

@@ -611,6 +611,10 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "di"), .dlang)
         XCTAssertEqual(CommentSyntax(fileExtension: "GO"), .go)
         XCTAssertEqual(CommentSyntax(fileExtension: "rs"), .rust)
+        XCTAssertEqual(CommentSyntax(fileExtension: "abap"), .abap)
+        XCTAssertEqual(CommentSyntax(fileExtension: "au3"), .autoIt)
+        XCTAssertEqual(CommentSyntax(fileExtension: "FSX"), .fsharp)
+        XCTAssertNil(CommentSyntax(fileExtension: "fsi"))
         XCTAssertNil(CommentSyntax(fileExtension: "mjs"))
         XCTAssertNil(CommentSyntax(fileExtension: "f95"))
         XCTAssertNil(CommentSyntax(fileExtension: "sv"))
@@ -1218,7 +1222,7 @@ final class LineDiffTests: XCTestCase {
         )
 
         XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
-        XCTAssertEqual(DiffSummary(rows: rawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: rawString).differences, 2)
         XCTAssertEqual(DiffSummary(rows: nonNested).differences, 1)
         XCTAssertEqual(DiffSummary(rows: noContinuation).differences, 1)
         XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
@@ -1298,6 +1302,165 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: persistentString).differences, 2)
         XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
         XCTAssertEqual(DiffSummary(rows: aliasedCookieByte).differences, 1)
+    }
+
+    func testAbapCommentsAndTemplatesMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .abap)
+        let comments = try LineDiff.compare(
+            left: "* left\nvalue \" left\nvalue ## left",
+            right: "* right\nvalue \" right\nvalue ## right",
+            options: options
+        )
+        let apostrophe = try LineDiff.compare(
+            left: "value = '\" left'",
+            right: "value = '\" right'",
+            options: options
+        )
+        let template = try LineDiff.compare(
+            left: "value = |\" left|",
+            right: "value = |\" right|",
+            options: options
+        )
+        let templateExpression = try LineDiff.compare(
+            left: "value = |{ name \" left }|",
+            right: "value = |{ name \" right }|",
+            options: options
+        )
+        let terminalQuote = try LineDiff.compare(
+            left: "value \"",
+            right: "other \"",
+            options: options
+        )
+        let continuedComment = try LineDiff.compare(
+            left: "* old\\\nleft continuation",
+            right: "* new\\\nright continuation",
+            options: options
+        )
+        let interpolation = try LineDiff.compare(
+            left: "value = 'prefix { name 'text' \" left } suffix'",
+            right: "value = 'prefix { name 'text' \" right } suffix'",
+            options: options
+        )
+        let templateSection = try LineDiff.compare(
+            left: "value = |prefix { name 'text' \" left } suffix|",
+            right: "value = |prefix { name 'text' \" right } suffix|",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: apostrophe).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: template).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: templateExpression).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: terminalQuote).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: continuedComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: interpolation).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: templateSection).differences, 1)
+    }
+
+    func testAutoItCommentsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .autoIt)
+        let lineComment = try LineDiff.compare(
+            left: "value ; left",
+            right: "value ; right",
+            options: options
+        )
+        let block = try LineDiff.compare(
+            left: "#cs old\nleft\n#ce value",
+            right: "#cs new\nright\n#ce value",
+            options: options
+        )
+        let longBlock = try LineDiff.compare(
+            left: "  #comments-start old\nleft\n  #comments-end value",
+            right: "  #comments-start new\nright\n  #comments-end value",
+            options: options
+        )
+        let mixedCase = try LineDiff.compare(
+            left: "#Cs left",
+            right: "#Cs right",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "value = '; left'",
+            right: "value = '; right'",
+            options: options
+        )
+        let preprocessorComment = try LineDiff.compare(
+            left: "#include \"; left\"",
+            right: "#include \"; right\"",
+            options: options
+        )
+        let variableBlock = try LineDiff.compare(
+            left: "$value #cs old\nleft\n#ce",
+            right: "$value #cs new\nright\n#ce",
+            options: options
+        )
+        let concurrentVariables = try LineDiff.compare(
+            left: "$@ #cs old\nleft\n#ce",
+            right: "$@ #cs new\nright\n#ce",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: lineComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: block).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: longBlock).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: mixedCase).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: preprocessorComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: variableBlock).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: concurrentVariables).differences, 1)
+    }
+
+    func testFSharpCommentsAndRawStringsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .fsharp)
+        let comments = try LineDiff.compare(
+            left: "value // left\n(* old\ncomment *) value",
+            right: "value // right\n(* new\ncomment *) value",
+            options: options
+        )
+        let rawString = try LineDiff.compare(
+            left: "value = \"\"\"https://left\n(* text *)\"\"\"",
+            right: "value = \"\"\"https://right\n(* other *)\"\"\"",
+            options: options
+        )
+        let nonNested = try LineDiff.compare(
+            left: "(* outer (* inner *) left",
+            right: "(* outer (* inner *) right",
+            options: options
+        )
+        let preprocessor = try LineDiff.compare(
+            left: "#define URL \"https://left\"",
+            right: "#define URL \"https://right\"",
+            options: options
+        )
+        let continuedComment = try LineDiff.compare(
+            left: "// old\\\nleft continuation",
+            right: "// new\\\nright continuation",
+            options: options
+        )
+        let overlappingTriple = try LineDiff.compare(
+            left: "\"\"\"\"// left",
+            right: "\"\"\"\"// right",
+            options: options
+        )
+        let guardedTriple = try LineDiff.compare(
+            left: "\"\"\"\"\"// left",
+            right: "\"\"\"\"\"// right",
+            options: options
+        )
+        let preprocessorParenStar = try LineDiff.compare(
+            left: "#define )* left *) value",
+            right: "#define )* right *) value",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: rawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: nonNested).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: preprocessor).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: continuedComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: overlappingTriple).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: guardedTriple).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: preprocessorParenStar).differences, 0)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {

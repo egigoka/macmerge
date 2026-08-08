@@ -405,6 +405,9 @@ private func validateComparisonSemantics() throws {
         ("value /+ left +/", "value /+ right +/", .dlang, "D comments"),
         ("value // left", "value // right", .go, "Go comments"),
         ("value // left", "value // right", .rust, "Rust comments"),
+        ("value \" left", "value \" right", .abap, "ABAP comments"),
+        ("value ; left", "value ; right", .autoIt, "AutoIt comments"),
+        ("value // left", "value // right", .fsharp, "F# comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -553,6 +556,26 @@ private func validateComparisonSemantics() throws {
           DiffSummary(rows: dTokenString).differences == 1,
           DiffSummary(rows: dAliasedCookieByte).differences == 1 else {
         throw BenchmarkError.semanticCheckFailed("D/Go/Rust syntax preservation")
+    }
+    let abapTemplate = try LineDiff.compare(
+        left: "value = |\" left|",
+        right: "value = |\" right|",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .abap)
+    )
+    let autoItBlock = try LineDiff.compare(
+        left: "#cs old\nleft\n#ce value",
+        right: "#cs new\nright\n#ce value",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .autoIt)
+    )
+    let fsharpRaw = try LineDiff.compare(
+        left: "\"\"\"https://left (* text *)\"\"\"",
+        right: "\"\"\"https://right (* other *)\"\"\"",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .fsharp)
+    )
+    guard DiffSummary(rows: abapTemplate).differences == 1,
+          DiffSummary(rows: autoItBlock).differences == 0,
+          DiffSummary(rows: fsharpRaw).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("ABAP/AutoIt/F# syntax preservation")
     }
     let markupProse = try LineDiff.compare(
         left: "don't <!-- left --> change",
