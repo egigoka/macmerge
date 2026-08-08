@@ -48,6 +48,9 @@ public enum CommentSyntax: Equatable, Sendable {
     case pascal
     case lua
     case innoSetup
+    case dlang
+    case go
+    case rust
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
@@ -101,6 +104,12 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .lua
         case "iss":
             self = .innoSetup
+        case "d", "di":
+            self = .dlang
+        case "go":
+            self = .go
+        case "rs":
+            self = .rust
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -686,6 +695,18 @@ private struct PascalCommentState {
     var quote: UInt16?
 }
 
+private enum DBlockCommentMode {
+    case slashStar
+    case slashPlus
+}
+
+private enum DStringMode {
+    case escaped
+    case rawQuote(delimiter: UInt16)
+    case backtick
+    case braceToken
+}
+
 private struct ComparisonTransform {
     struct CommentFilteredContents {
         let contents: [String]
@@ -909,6 +930,12 @@ private struct ComparisonTransform {
             return luaCommentFilteredContents(in: document)
         case .innoSetup:
             return innoSetupCommentFilteredContents(in: document)
+        case .dlang:
+            return dCommentFilteredContents(in: document)
+        case .go:
+            return goCommentFilteredContents(in: document)
+        case .rust:
+            return rustCommentFilteredContents(in: document)
         case .matlab:
             return matlabCommentFilteredContents(in: document)
         case .properties:
@@ -952,7 +979,7 @@ private struct ComparisonTransform {
             supportsTripleQuotedStrings = false
         case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
              .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch, .pascal,
-             .lua, .innoSetup:
+             .lua, .innoSetup, .dlang, .go, .rust:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
@@ -1742,6 +1769,353 @@ private struct ComparisonTransform {
         guard start < units.count, units[start] == 91,
               let end = units[(start + 1)...].firstIndex(of: 93) else { return nil }
         return String(decoding: units[(start + 1)..<end], as: UTF16.self)
+    }
+
+    private func goCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inBlockComment = false
+        var inRawString = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var quote: UInt16?
+            var containedComment = inBlockComment
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if !inBlockComment { output.append(contentsOf: units[index...]) }
+                    break
+                }
+                if inBlockComment {
+                    containedComment = true
+                    if index + 1 < units.count, character == 42, units[index + 1] == 47 {
+                        inBlockComment = false
+                        index += 2
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if inRawString {
+                    output.append(character)
+                    if character == 96 { inRawString = false }
+                    index += 1
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: units, at: index) {
+                        quote = nil
+                    }
+                    index += 1
+                    continue
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                    containedComment = true
+                    break
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                    containedComment = true
+                    inBlockComment = true
+                    index += 2
+                    continue
+                }
+                if character == 96 {
+                    inRawString = true
+                } else if character == 34 || character == 39 &&
+                          (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                    quote = character
+                }
+                output.append(character)
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func rustCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var blockDepth: Int?
+        var inString = false
+        var rawHashCount: Int?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var rawPayloadStart: Int? = rawHashCount == nil ? nil : -1
+            var containedComment = blockDepth != nil
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if blockDepth == nil { output.append(contentsOf: units[index...]) }
+                    break
+                }
+                if let depth = blockDepth {
+                    containedComment = true
+                    if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                        blockDepth = (depth + 1) & 0xF
+                        index += 2
+                    } else if index + 1 < units.count, character == 42, units[index + 1] == 47 {
+                        blockDepth = depth == 0 ? nil : depth - 1
+                        index += 2
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if inString {
+                    output.append(character)
+                    if character == 34, Self.twoLookbackQuoteCloses(in: units, at: index) { inString = false }
+                    index += 1
+                    continue
+                }
+                if let hashCount = rawHashCount {
+                    output.append(character)
+                    if character == 34, index > (rawPayloadStart ?? index),
+                       index + hashCount < units.count,
+                       units[index..<(index + hashCount + 1)].dropFirst().allSatisfy({ $0 == 35 }) {
+                        if hashCount > 0 { output.append(contentsOf: units[(index + 1)...(index + hashCount)]) }
+                        rawHashCount = nil
+                        rawPayloadStart = nil
+                        index += hashCount + 1
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                    containedComment = true
+                    break
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                    containedComment = true
+                    blockDepth = 0
+                    index += 2
+                    continue
+                }
+                if let raw = Self.rustRawStringOpener(in: units, at: index) {
+                    rawHashCount = raw.hashCount & 0xF
+                    rawPayloadStart = raw.end
+                    output.append(contentsOf: units[index..<raw.end])
+                    index = raw.end
+                    continue
+                }
+                if character == 34 { inString = true }
+                output.append(character)
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func dCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var blockMode: DBlockCommentMode?
+        var stringMode: DStringMode?
+        var sharedCookieByte = 0
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var characterQuote = false
+            var containedComment = blockMode != nil
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if blockMode == nil { output.append(contentsOf: units[index...]) }
+                    break
+                }
+                if let mode = blockMode {
+                    containedComment = true
+                    let depth = sharedCookieByte & 0xF
+                    switch mode {
+                    case .slashStar:
+                        if depth == 0 {
+                            if index + 1 < units.count, character == 42, units[index + 1] == 47 {
+                                blockMode = nil
+                                index += 2
+                            } else {
+                                index += 1
+                            }
+                        } else if index + 1 < units.count, character == 47, units[index + 1] == 43 {
+                            sharedCookieByte = (sharedCookieByte & 0xF0) | ((depth + 1) & 0xF)
+                            index += 2
+                        } else if index + 1 < units.count, character == 43, units[index + 1] == 47 {
+                            if depth <= 1 { blockMode = nil }
+                            sharedCookieByte = (sharedCookieByte & 0xF0) | ((depth - 1) & 0xF)
+                            index += 2
+                        } else {
+                            index += 1
+                        }
+                    case .slashPlus:
+                        if depth == 0 {
+                            if index + 1 < units.count, character == 42, units[index + 1] == 47 {
+                                blockMode = nil
+                                index += 2
+                            } else {
+                                index += 1
+                            }
+                        } else if index + 1 < units.count, character == 47, units[index + 1] == 43 {
+                            sharedCookieByte = (sharedCookieByte & 0xF0) | ((depth + 1) & 0xF)
+                            index += 2
+                        } else if index + 1 < units.count, character == 43, units[index + 1] == 47 {
+                            if depth <= 1 { blockMode = nil }
+                            sharedCookieByte = (sharedCookieByte & 0xF0) | ((depth - 1) & 0xF)
+                            index += 2
+                        } else {
+                            index += 1
+                        }
+                    }
+                    continue
+                }
+                if let mode = stringMode {
+                    output.append(character)
+                    switch mode {
+                    case .escaped:
+                        if character == 34, Self.fullBackslashParityQuoteCloses(in: units, at: index) {
+                            stringMode = nil
+                        }
+                        index += 1
+                    case .rawQuote(let delimiter):
+                        if character == 34, delimiter == 0 || index > 0 && units[index - 1] == delimiter {
+                            stringMode = nil
+                        }
+                        index += 1
+                    case .backtick:
+                        if sharedCookieByte >> 4 == 0, character == 96 { stringMode = nil }
+                        index += 1
+                    case .braceToken:
+                        let depth = sharedCookieByte >> 4
+                        if character == 123 {
+                            sharedCookieByte = (sharedCookieByte & 0x0F) | (((depth + 1) & 0xF) << 4)
+                        } else if character == 125 {
+                            if depth <= 1 { stringMode = nil }
+                            sharedCookieByte = (sharedCookieByte & 0x0F) | (((depth - 1) & 0xF) << 4)
+                        }
+                        index += 1
+                    }
+                    continue
+                }
+                if characterQuote {
+                    output.append(character)
+                    if character == 39, Self.twoLookbackQuoteCloses(in: units, at: index) { characterQuote = false }
+                    index += 1
+                    continue
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                    containedComment = true
+                    break
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                    containedComment = true
+                    blockMode = .slashStar
+                    index += 2
+                    continue
+                }
+                if index + 1 < units.count, character == 47, units[index + 1] == 43 {
+                    containedComment = true
+                    blockMode = .slashPlus
+                    sharedCookieByte = (sharedCookieByte & 0xF0) | 1
+                    index += 2
+                    continue
+                }
+                if index + 1 < units.count, character == 113, units[index + 1] == 123 {
+                    stringMode = .braceToken
+                    sharedCookieByte = (sharedCookieByte & 0x0F) | 0x10
+                    output.append(contentsOf: units[index...index + 1])
+                    index += 2
+                    continue
+                }
+                if character == 96 {
+                    stringMode = sharedCookieByte >> 4 == 0 ? .backtick : .braceToken
+                } else if character == 34 {
+                    if index > 0, units[index - 1] == 114 {
+                        stringMode = .rawQuote(delimiter: 0)
+                    } else if index > 0, units[index - 1] == 113 {
+                        let delimiter = index + 1 < units.count ? Self.dClosingDelimiter(units[index + 1]) : 0
+                        sharedCookieByte = Int(delimiter & 0xFF)
+                        stringMode = .rawQuote(delimiter: delimiter)
+                    } else {
+                        stringMode = .escaped
+                    }
+                } else if character == 39, index == 0 || !Self.legacyIsAlphanumeric(units[index - 1]) {
+                    characterQuote = true
+                }
+                output.append(character)
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func rustRawStringOpener(
+        in units: [UInt16],
+        at index: Int
+    ) -> (hashCount: Int, end: Int)? {
+        let prefix: Int
+        if units[index] == 114 {
+            prefix = 1
+        } else if units[index] == 98, index + 1 < units.count, units[index + 1] == 114 {
+            prefix = 2
+        } else {
+            return nil
+        }
+        var cursor = index + prefix
+        var hashCount = 0
+        while cursor < units.count, units[cursor] == 35 {
+            hashCount += 1
+            cursor += 1
+        }
+        guard cursor < units.count, units[cursor] == 34 else { return nil }
+        return (hashCount, cursor + 1)
+    }
+
+    private static func fullBackslashParityQuoteCloses(in units: [UInt16], at index: Int) -> Bool {
+        var cursor = index
+        var count = 0
+        while cursor > 0, units[cursor - 1] == 92 {
+            count += 1
+            cursor -= 1
+        }
+        return count.isMultiple(of: 2)
+    }
+
+    private static func dClosingDelimiter(_ delimiter: UInt16) -> UInt16 {
+        switch delimiter {
+        case 40: 41
+        case 91: 93
+        case 123: 125
+        case 60: 62
+        default: delimiter
+        }
     }
 
     private func matlabCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {

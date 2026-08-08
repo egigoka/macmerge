@@ -402,6 +402,9 @@ private func validateComparisonSemantics() throws {
         ("value // left", "value // right", .pascal, "Pascal comments"),
         ("value -- left", "value -- right", .lua, "Lua comments"),
         ("[Code]\nvalue // left", "[Code]\nvalue // right", .innoSetup, "Inno Setup comments"),
+        ("value /+ left +/", "value /+ right +/", .dlang, "D comments"),
+        ("value // left", "value // right", .go, "Go comments"),
+        ("value // left", "value // right", .rust, "Rust comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -524,6 +527,32 @@ private func validateComparisonSemantics() throws {
           DiffSummary(rows: innoConstant).differences == 1,
           DiffSummary(rows: innoPreprocessorComment).differences == 0 else {
         throw BenchmarkError.semanticCheckFailed("Pascal/Lua/Inno syntax preservation")
+    }
+    let goRawString = try LineDiff.compare(
+        left: "value := `https://left/*x*/`",
+        right: "value := `https://right/*y*/`",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .go)
+    )
+    let rustCharacter = try LineDiff.compare(
+        left: "value = '// left';",
+        right: "value = '// right';",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .rust)
+    )
+    let dTokenString = try LineDiff.compare(
+        left: "value = q{https://left /+ text +/};",
+        right: "value = q{https://right /+ text +/};",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .dlang)
+    )
+    let dAliasedCookieByte = try LineDiff.compare(
+        left: "q\"[value]\" `// left`",
+        right: "q\"[value]\" `// right`",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .dlang)
+    )
+    guard DiffSummary(rows: goRawString).differences == 1,
+          DiffSummary(rows: rustCharacter).differences == 0,
+          DiffSummary(rows: dTokenString).differences == 1,
+          DiffSummary(rows: dAliasedCookieByte).differences == 1 else {
+        throw BenchmarkError.semanticCheckFailed("D/Go/Rust syntax preservation")
     }
     let markupProse = try LineDiff.compare(
         left: "don't <!-- left --> change",

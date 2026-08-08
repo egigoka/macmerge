@@ -608,6 +608,9 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "pas"), .pascal)
         XCTAssertEqual(CommentSyntax(fileExtension: "lua"), .lua)
         XCTAssertEqual(CommentSyntax(fileExtension: "iss"), .innoSetup)
+        XCTAssertEqual(CommentSyntax(fileExtension: "di"), .dlang)
+        XCTAssertEqual(CommentSyntax(fileExtension: "GO"), .go)
+        XCTAssertEqual(CommentSyntax(fileExtension: "rs"), .rust)
         XCTAssertNil(CommentSyntax(fileExtension: "mjs"))
         XCTAssertNil(CommentSyntax(fileExtension: "f95"))
         XCTAssertNil(CommentSyntax(fileExtension: "sv"))
@@ -1184,6 +1187,117 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: nonBreakingSpace).differences, 1)
         XCTAssertEqual(DiffSummary(rows: combinedSectionCloser).differences, 0)
         XCTAssertEqual(DiffSummary(rows: nonBreakingSectionPrefix).differences, 1)
+    }
+
+    func testGoCommentsAndRawStringsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .go)
+        let comments = try LineDiff.compare(
+            left: "value // left\n/* old\ncomment */ end",
+            right: "value // right\n/* new\ncomment */ end",
+            options: options
+        )
+        let rawString = try LineDiff.compare(
+            left: "value := `https://left\n/* left */`",
+            right: "value := `https://right\n/* right */`",
+            options: options
+        )
+        let nonNested = try LineDiff.compare(
+            left: "/* outer /* inner */ left",
+            right: "/* outer /* inner */ right",
+            options: options
+        )
+        let noContinuation = try LineDiff.compare(
+            left: "// old\\\nleft continuation",
+            right: "// new\\\nright continuation",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "value\0// left",
+            right: "value\0// right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: rawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: nonNested).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: noContinuation).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
+    }
+
+    func testRustCommentsAndRawStringsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .rust)
+        let nestedComments = try LineDiff.compare(
+            left: "/* outer /* old */ end */ value",
+            right: "/* outer /* new */ end */ value",
+            options: options
+        )
+        let rawString = try LineDiff.compare(
+            left: "value = r#\"https://left/*x*/\"#;",
+            right: "value = r#\"https://right/*y*/\"#;",
+            options: options
+        )
+        let characterLiteral = try LineDiff.compare(
+            left: "value = '// left';",
+            right: "value = '// right';",
+            options: options
+        )
+        let emptyRawString = try LineDiff.compare(
+            left: "r\"\" // left\nleft hidden",
+            right: "r\"\" // right\nright hidden",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "/* old\0*/\nleft hidden",
+            right: "/* new\0*/\nright hidden",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: nestedComments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: rawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: characterLiteral).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: emptyRawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 0)
+    }
+
+    func testDCommentsAndTokenStringsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .dlang)
+        let comments = try LineDiff.compare(
+            left: "value // left\n/+ outer /+ old +/ end +/ value",
+            right: "value // right\n/+ outer /+ new +/ end +/ value",
+            options: options
+        )
+        let tokenString = try LineDiff.compare(
+            left: "value = q{https://left /+ text +/};",
+            right: "value = q{https://right /+ text +/};",
+            options: options
+        )
+        let rawQuote = try LineDiff.compare(
+            left: "value = q\"[https://left/]\";",
+            right: "value = q\"[https://right/]\";",
+            options: options
+        )
+        let persistentString = try LineDiff.compare(
+            left: "\"https://left\n// inside string",
+            right: "\"https://right\n// inside string",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "value\0/+ left +/",
+            right: "value\0/+ right +/",
+            options: options
+        )
+        let aliasedCookieByte = try LineDiff.compare(
+            left: "q\"[value]\" `// left`",
+            right: "q\"[value]\" `// right`",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: tokenString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: rawQuote).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: persistentString).differences, 2)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: aliasedCookieByte).differences, 1)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {
