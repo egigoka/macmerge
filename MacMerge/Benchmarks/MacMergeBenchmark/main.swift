@@ -399,6 +399,9 @@ private func validateComparisonSemantics() throws {
         ("value // left", "value // right", .resources, "Resource comments"),
         ("value // left", "value // right", .verilog, "Verilog comments"),
         ("REM left", "REM right", .batch, "Batch comments"),
+        ("value // left", "value // right", .pascal, "Pascal comments"),
+        ("value -- left", "value -- right", .lua, "Lua comments"),
+        ("[Code]\nvalue // left", "[Code]\nvalue // right", .innoSetup, "Inno Setup comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -489,6 +492,38 @@ private func validateComparisonSemantics() throws {
           DiffSummary(rows: batchAtRem).differences == 1,
           DiffSummary(rows: batchUtf16Colon).differences == 0 else {
         throw BenchmarkError.semanticCheckFailed("legacy parser anomalies")
+    }
+    let pascalDirective = try LineDiff.compare(
+        left: "{$OLD}",
+        right: "{$NEW}",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .pascal)
+    )
+    let pascalEscapedRawString = try LineDiff.compare(
+        left: "'\\'''\n// left",
+        right: "'\\'''\n// right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .pascal)
+    )
+    let luaLongString = try LineDiff.compare(
+        left: "value = [=[-- left]=]",
+        right: "value = [=[-- right]=]",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .lua)
+    )
+    let innoConstant = try LineDiff.compare(
+        left: "Source: {app}\\left",
+        right: "Source: {app}\\right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .innoSetup)
+    )
+    let innoPreprocessorComment = try LineDiff.compare(
+        left: "#; left",
+        right: "#; right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .innoSetup)
+    )
+    guard DiffSummary(rows: pascalDirective).differences == 1,
+          DiffSummary(rows: pascalEscapedRawString).differences == 1,
+          DiffSummary(rows: luaLongString).differences == 1,
+          DiffSummary(rows: innoConstant).differences == 1,
+          DiffSummary(rows: innoPreprocessorComment).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("Pascal/Lua/Inno syntax preservation")
     }
     let markupProse = try LineDiff.compare(
         left: "don't <!-- left --> change",

@@ -45,6 +45,9 @@ public enum CommentSyntax: Equatable, Sendable {
     case resources
     case verilog
     case batch
+    case pascal
+    case lua
+    case innoSetup
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
@@ -92,6 +95,12 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .verilog
         case "bat", "btm", "cmd":
             self = .batch
+        case "pas":
+            self = .pascal
+        case "lua":
+            self = .lua
+        case "iss":
+            self = .innoSetup
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -668,6 +677,15 @@ private struct PreparedComparisonPair {
     let right: PreparedComparison
 }
 
+private struct PascalCommentState {
+    var lineComment = false
+    var parenComment = false
+    var braceComment = false
+    var directive = false
+    var rawString = false
+    var quote: UInt16?
+}
+
 private struct ComparisonTransform {
     struct CommentFilteredContents {
         let contents: [String]
@@ -885,6 +903,12 @@ private struct ComparisonTransform {
             )
         case .batch:
             return batchCommentFilteredContents(in: document)
+        case .pascal:
+            return pascalCommentFilteredContents(in: document)
+        case .lua:
+            return luaCommentFilteredContents(in: document)
+        case .innoSetup:
+            return innoSetupCommentFilteredContents(in: document)
         case .matlab:
             return matlabCommentFilteredContents(in: document)
         case .properties:
@@ -927,7 +951,8 @@ private struct ComparisonTransform {
             blockDelimiter = ("<!--", "-->")
             supportsTripleQuotedStrings = false
         case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
-             .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch:
+             .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch, .pascal,
+             .lua, .innoSetup:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
@@ -1317,6 +1342,408 @@ private struct ComparisonTransform {
         return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
     }
 
+    private func pascalCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var state = PascalCommentState()
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let result = Self.filterPascalCommentLine(record.content, state: &state)
+            if record.content.isEmpty {
+                state.lineComment = false
+                state.directive = false
+                state.quote = nil
+            } else if record.content.last != "\\" {
+                state.lineComment = false
+                state.directive = false
+                state.quote = nil
+            }
+            contents.append(result.output)
+            commentOnly.append(Self.isWholeCommentLine(
+                result.containedComment,
+                output: result.output,
+                record: record
+            ))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func luaCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var longCommentEquals: Int?
+        var longStringEquals: Int?
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var quote: UInt16?
+            var containedComment = longCommentEquals != nil
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    if longCommentEquals == nil { output.append(contentsOf: units[index...]) }
+                    break
+                }
+
+                if let equalsCount = longCommentEquals {
+                    containedComment = true
+                    if let end = Self.luaLongDelimiterEnd(
+                        in: units,
+                        at: index,
+                        bracket: 93,
+                        equalsCount: equalsCount
+                    ) {
+                        longCommentEquals = nil
+                        index = end
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if let equalsCount = longStringEquals {
+                    if let end = Self.luaLongDelimiterEnd(
+                        in: units,
+                        at: index,
+                        bracket: 93,
+                        equalsCount: equalsCount
+                    ) {
+                        output.append(contentsOf: units[index..<end])
+                        longStringEquals = nil
+                        index = end
+                    } else {
+                        output.append(character)
+                        index += 1
+                    }
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: units, at: index) {
+                        quote = nil
+                    }
+                    index += 1
+                    continue
+                }
+                if index + 1 < units.count, character == 45, units[index + 1] == 45 {
+                    if let delimiter = Self.luaLongDelimiter(in: units, at: index + 2, bracket: 91) {
+                        containedComment = true
+                        longCommentEquals = delimiter.equalsCount & 0xF
+                        index = delimiter.end
+                    } else {
+                        containedComment = true
+                        break
+                    }
+                    continue
+                }
+                if character == 34 || character == 39 && (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                    quote = character
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if let delimiter = Self.luaLongDelimiter(in: units, at: index, bracket: 91) {
+                    longStringEquals = delimiter.equalsCount & 0xF
+                    output.append(contentsOf: units[index..<delimiter.end])
+                    index = delimiter.end
+                    continue
+                }
+                output.append(character)
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private func innoSetupCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var inCodeSection = false
+        var pascalState = PascalCommentState()
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            if record.content.isEmpty {
+                pascalState.lineComment = false
+                pascalState.directive = false
+                pascalState.rawString = false
+                pascalState.quote = nil
+                contents.append("")
+                commentOnly.append(false)
+                continue
+            }
+
+            if let section = Self.innoSetupSection(in: record.content) {
+                inCodeSection = section.caseInsensitiveCompare("Code") == .orderedSame
+                pascalState = PascalCommentState()
+            } else if inCodeSection {
+                let result = Self.filterPascalCommentLine(record.content, state: &pascalState)
+                if record.content.last != "\\" {
+                    pascalState.lineComment = false
+                    pascalState.directive = false
+                    pascalState.quote = nil
+                }
+                contents.append(result.output)
+                commentOnly.append(Self.isWholeCommentLine(
+                    result.containedComment,
+                    output: result.output,
+                    record: record
+                ))
+                continue
+            }
+
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var quote: UInt16?
+            var inConstant = false
+            var inSection = false
+            var firstToken = true
+            var containedComment = false
+
+            while index < units.count {
+                let character = units[index]
+                if character == 0 {
+                    output.append(contentsOf: units[index...])
+                    break
+                }
+                if inConstant {
+                    output.append(character)
+                    if character == 125 { inConstant = false }
+                    index += 1
+                    continue
+                }
+                if inSection {
+                    output.append(character)
+                    if character == 93 { inSection = false }
+                    index += 1
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    if character == activeQuote, Self.twoLookbackQuoteCloses(in: units, at: index) {
+                        quote = nil
+                    }
+                    index += 1
+                    continue
+                }
+                if character == 34 || character == 39 && (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                    quote = character
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if character == 123 {
+                    inConstant = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if firstToken, character == 91 {
+                    inSection = true
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if firstToken, character == 35 {
+                    output.append(character)
+                    index += 1
+                    continue
+                }
+                if firstToken, character == 59 {
+                    containedComment = true
+                    break
+                }
+                output.append(character)
+                if !Self.legacyIsWhitespace(character) { firstToken = false }
+                index += 1
+            }
+
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func filterPascalCommentLine(
+        _ text: String,
+        state: inout PascalCommentState
+    ) -> (output: String, containedComment: Bool) {
+        let units = Array(text.utf16)
+        var output: [UInt16] = []
+        var index = 0
+        var containedComment = state.lineComment || state.parenComment || state.braceComment
+
+        if state.lineComment { return ("", true) }
+        while index < units.count {
+            let character = units[index]
+            if character == 0 {
+                if !state.parenComment, !state.braceComment { output.append(contentsOf: units[index...]) }
+                break
+            }
+
+            if state.parenComment {
+                containedComment = true
+                if index + 1 < units.count, character == 42, units[index + 1] == 41,
+                   index == 0 || units[index - 1] != 40 {
+                    state.parenComment = false
+                    index += 2
+                } else {
+                    index += 1
+                }
+                continue
+            }
+            if state.braceComment {
+                containedComment = true
+                if character == 125 { state.braceComment = false }
+                index += 1
+                continue
+            }
+            if state.directive {
+                output.append(character)
+                if character == 125 {
+                    state.directive = false
+                } else if index + 1 < units.count, character == 42, units[index + 1] == 41,
+                          index == 0 || units[index - 1] != 40 {
+                    output.append(41)
+                    state.directive = false
+                    index += 2
+                    continue
+                }
+                index += 1
+                continue
+            }
+            if state.rawString {
+                output.append(character)
+                if index + 2 < units.count, character == 39, units[index + 1] == 39, units[index + 2] == 39,
+                   Self.pascalRawStringCanClose(in: units, at: index) {
+                    output.append(contentsOf: [39, 39])
+                    state.rawString = false
+                    index += 3
+                } else {
+                    index += 1
+                }
+                continue
+            }
+            if let activeQuote = state.quote {
+                output.append(character)
+                if character == activeQuote, Self.twoLookbackQuoteCloses(in: units, at: index) {
+                    if activeQuote == 39, index > 0, index + 1 < units.count,
+                       units[index - 1] == 39, units[index + 1] == 39,
+                       (index + 2 == units.count || units[index + 2] != 39),
+                       Self.pascalRawStringCanOpen(in: units, after: index + 2) {
+                        output.append(39)
+                        state.quote = nil
+                        state.rawString = true
+                        index += 2
+                        continue
+                    }
+                    state.quote = nil
+                }
+                index += 1
+                continue
+            }
+            if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                containedComment = true
+                state.lineComment = true
+                break
+            }
+            if index + 1 < units.count, character == 40, units[index + 1] == 42 {
+                if index + 2 < units.count, units[index + 2] == 36 {
+                    state.directive = true
+                    output.append(contentsOf: [40, 42])
+                } else {
+                    state.parenComment = true
+                    containedComment = true
+                }
+                index += 2
+                continue
+            }
+            if character == 123 {
+                if index + 1 < units.count, units[index + 1] == 36 {
+                    state.directive = true
+                    output.append(character)
+                } else {
+                    state.braceComment = true
+                    containedComment = true
+                }
+                index += 1
+                continue
+            }
+            if index + 2 < units.count, character == 39, units[index + 1] == 39, units[index + 2] == 39,
+               (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])),
+               Self.pascalRawStringCanOpen(in: units, after: index + 3) {
+                state.rawString = true
+                output.append(contentsOf: [39, 39, 39])
+                index += 3
+                continue
+            }
+            if character == 34 || character == 39 && (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                state.quote = character
+            }
+            output.append(character)
+            index += 1
+        }
+        return (String(decoding: output, as: UTF16.self), containedComment)
+    }
+
+    private static func pascalRawStringCanOpen(in units: [UInt16], after index: Int) -> Bool {
+        units[index...].allSatisfy { $0 == 32 || $0 == 9 }
+    }
+
+    private static func pascalRawStringCanClose(in units: [UInt16], at index: Int) -> Bool {
+        guard index > 0 else { return true }
+        return units[1..<index].allSatisfy { $0 == 32 || $0 == 9 }
+    }
+
+    private static func luaLongDelimiter(
+        in units: [UInt16],
+        at index: Int,
+        bracket: UInt16
+    ) -> (equalsCount: Int, end: Int)? {
+        guard index < units.count, units[index] == bracket else { return nil }
+        var cursor = index + 1
+        var equalsCount = 0
+        while cursor < units.count, units[cursor] == 61 {
+            equalsCount += 1
+            cursor += 1
+        }
+        guard cursor < units.count, units[cursor] == bracket else { return nil }
+        return (equalsCount, cursor + 1)
+    }
+
+    private static func luaLongDelimiterEnd(
+        in units: [UInt16],
+        at index: Int,
+        bracket: UInt16,
+        equalsCount: Int
+    ) -> Int? {
+        guard let delimiter = luaLongDelimiter(in: units, at: index, bracket: bracket),
+              delimiter.equalsCount == equalsCount else { return nil }
+        return delimiter.end
+    }
+
+    private static func innoSetupSection(in text: String) -> String? {
+        let units = Array(text.utf16)
+        var start = 0
+        while start < units.count, legacyIsWhitespace(units[start]) { start += 1 }
+        guard start < units.count, units[start] == 91,
+              let end = units[(start + 1)...].firstIndex(of: 93) else { return nil }
+        return String(decoding: units[(start + 1)..<end], as: UTF16.self)
+    }
+
     private func matlabCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {
         var contents: [String] = []
         var commentOnly: [Bool] = []
@@ -1644,6 +2071,10 @@ private struct ComparisonTransform {
         return text[text.index(before: previous)] == "\\"
     }
 
+    private static func twoLookbackQuoteCloses(in units: [UInt16], at index: Int) -> Bool {
+        index == 0 || units[index - 1] != 92 || index >= 2 && units[index - 2] == 92
+    }
+
     private static func oneLookbackQuoteCloses(in text: String, at index: String.Index) -> Bool {
         index == text.startIndex || text[text.index(before: index)] != "\\"
     }
@@ -1659,7 +2090,7 @@ private struct ComparisonTransform {
     }
 
     private static func legacyIsWhitespace(_ codeUnit: UInt16) -> Bool {
-        UnicodeScalar(codeUnit).map(CharacterSet.whitespacesAndNewlines.contains) == true
+        codeUnit == 32 || (9...13).contains(codeUnit)
     }
 
     private func quotedLineCommentFilteredContents(

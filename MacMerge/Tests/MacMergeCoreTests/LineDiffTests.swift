@@ -605,6 +605,9 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "rc2"), .resources)
         XCTAssertEqual(CommentSyntax(fileExtension: "vh"), .verilog)
         XCTAssertEqual(CommentSyntax(fileExtension: "cmd"), .batch)
+        XCTAssertEqual(CommentSyntax(fileExtension: "pas"), .pascal)
+        XCTAssertEqual(CommentSyntax(fileExtension: "lua"), .lua)
+        XCTAssertEqual(CommentSyntax(fileExtension: "iss"), .innoSetup)
         XCTAssertNil(CommentSyntax(fileExtension: "mjs"))
         XCTAssertNil(CommentSyntax(fileExtension: "f95"))
         XCTAssertNil(CommentSyntax(fileExtension: "sv"))
@@ -1022,6 +1025,165 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: doubleColon).differences, 0)
         XCTAssertEqual(DiffSummary(rows: bareDoubleColon).differences, 1)
         XCTAssertEqual(DiffSummary(rows: utf16Colon).differences, 0)
+    }
+
+    func testPascalCommentsAndDirectivesMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .pascal)
+        let comments = try LineDiff.compare(
+            left: "value { old } end\n(* old *)\nvalue // old",
+            right: "value { new } end\n(* new *)\nvalue // new",
+            options: options
+        )
+        let directives = try LineDiff.compare(
+            left: "{$OLD}\n(*$OLD*)",
+            right: "{$NEW}\n(*$NEW*)",
+            options: options
+        )
+        let quoted = try LineDiff.compare(
+            left: "value := '// left';",
+            right: "value := '// right';",
+            options: options
+        )
+        let continuedComment = try LineDiff.compare(
+            left: "// old\\\nleft continuation\nend",
+            right: "// new\\\nright continuation\nend",
+            options: options
+        )
+        let blankInBlock = try LineDiff.compare(
+            left: "head\n(* comment\n\n*)\ntail\n",
+            right: "head\n(* comment\n*)\ntail\n",
+            options: options
+        )
+        let escapedRawString = try LineDiff.compare(
+            left: "'\\'''\n// left",
+            right: "'\\'''\n// right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: directives).differences, 2)
+        XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: continuedComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: blankInBlock).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: escapedRawString).differences, 1)
+    }
+
+    func testLuaLongCommentsAndStringsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .lua)
+        let comments = try LineDiff.compare(
+            left: "value -- old\n--[=[ old\ncomment ]=] end",
+            right: "value -- new\n--[=[ new\ncomment ]=] end",
+            options: options
+        )
+        let longString = try LineDiff.compare(
+            left: "value = [=[-- left]=]",
+            right: "value = [=[-- right]=]",
+            options: options
+        )
+        let mismatchedCloser = try LineDiff.compare(
+            left: "--[=[ old\n]]\nleft hidden",
+            right: "--[=[ new\n]]\nright hidden",
+            options: options
+        )
+        let wrappedEquals = try LineDiff.compare(
+            left: "--[================[ old\n]] left",
+            right: "--[================[ new\n]] right",
+            options: options
+        )
+        let combiningLineComment = try LineDiff.compare(
+            left: "--\u{0301}left",
+            right: "--\u{0301}right",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "value\0-- left",
+            right: "value\0-- right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: longString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: mismatchedCloser).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: wrappedEquals).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: combiningLineComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
+    }
+
+    func testInnoSetupSwitchesBetweenSetupAndPascalComments() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .innoSetup)
+        let setupComment = try LineDiff.compare(
+            left: "  ; left",
+            right: "  ; right",
+            options: options
+        )
+        let inlineSemicolon = try LineDiff.compare(
+            left: "value ; left",
+            right: "value ; right",
+            options: options
+        )
+        let constant = try LineDiff.compare(
+            left: "Source: {app}\\left",
+            right: "Source: {app}\\right",
+            options: options
+        )
+        let codeComment = try LineDiff.compare(
+            left: "[Code]\nvalue := 1; // left\n{ old }",
+            right: "[Code]\nvalue := 1; // right\n{ new }",
+            options: options
+        )
+        let quotedPrefix = try LineDiff.compare(
+            left: "\"value\" ; left",
+            right: "\"value\" ; right",
+            options: options
+        )
+        let preprocessor = try LineDiff.compare(
+            left: "#; left",
+            right: "#; right",
+            options: options
+        )
+        let combiningComment = try LineDiff.compare(
+            left: ";\u{0301}left",
+            right: ";\u{0301}right",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "{x\0}; left",
+            right: "{x\0}; right",
+            options: options
+        )
+        let sectionInsideComment = try LineDiff.compare(
+            left: "[Code]\n(* old\n[Files]\nvalue ; left",
+            right: "[Code]\n(* new\n[Files]\nvalue ; right",
+            options: options
+        )
+        let nonBreakingSpace = try LineDiff.compare(
+            left: "\u{00A0}; left",
+            right: "\u{00A0}; right",
+            options: options
+        )
+        let combinedSectionCloser = try LineDiff.compare(
+            left: "[Code]\u{0301}\nvalue // left",
+            right: "[Code]\u{0301}\nvalue // right",
+            options: options
+        )
+        let nonBreakingSectionPrefix = try LineDiff.compare(
+            left: "\u{00A0}[Code]\nvalue // left",
+            right: "\u{00A0}[Code]\nvalue // right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: setupComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: inlineSemicolon).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: constant).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: codeComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: quotedPrefix).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: preprocessor).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: combiningComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: sectionInsideComment).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: nonBreakingSpace).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: combinedSectionCloser).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: nonBreakingSectionPrefix).differences, 1)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {
