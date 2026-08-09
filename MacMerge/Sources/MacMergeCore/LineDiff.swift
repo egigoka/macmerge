@@ -54,6 +54,9 @@ public enum CommentSyntax: Equatable, Sendable {
     case abap
     case autoIt
     case fsharp
+    case asp
+    case php
+    case smarty
 
     public init?(fileExtension: String) {
         switch fileExtension.lowercased() {
@@ -119,6 +122,12 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .autoIt
         case "fs", "fsx":
             self = .fsharp
+        case "asp", "ascx":
+            self = .asp
+        case "php", "php3", "php4", "php5", "phtml":
+            self = .php
+        case "tpl":
+            self = .smarty
         case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
              "mkd", "mkdn", "sgml", "xml":
             self = .markup
@@ -716,6 +725,34 @@ private enum DStringMode {
     case braceToken
 }
 
+private enum EmbeddedHTMLLanguage {
+    case asp
+    case php
+    case smarty
+}
+
+private enum EmbeddedHTMLMode {
+    case html
+    case embedded
+    case script
+    case style
+}
+
+private enum EmbeddedCommentKind {
+    case html
+    case cBlock
+    case smarty
+}
+
+private enum EmbeddedQuoteContext {
+    case html
+    case script
+    case style
+    case php
+    case smarty
+    case asp
+}
+
 private struct ComparisonTransform {
     struct CommentFilteredContents {
         let contents: [String]
@@ -951,6 +988,12 @@ private struct ComparisonTransform {
             return autoItCommentFilteredContents(in: document)
         case .fsharp:
             return fsharpCommentFilteredContents(in: document)
+        case .asp:
+            return embeddedHTMLCommentFilteredContents(in: document, language: .asp)
+        case .php:
+            return embeddedHTMLCommentFilteredContents(in: document, language: .php)
+        case .smarty:
+            return embeddedHTMLCommentFilteredContents(in: document, language: .smarty)
         case .matlab:
             return matlabCommentFilteredContents(in: document)
         case .properties:
@@ -994,7 +1037,7 @@ private struct ComparisonTransform {
             supportsTripleQuotedStrings = false
         case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
              .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch, .pascal,
-             .lua, .innoSetup, .dlang, .go, .rust, .abap, .autoIt, .fsharp:
+             .lua, .innoSetup, .dlang, .go, .rust, .abap, .autoIt, .fsharp, .asp, .php, .smarty:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
@@ -2456,6 +2499,531 @@ private struct ComparisonTransform {
             }
         }
         return nil
+    }
+
+    private func embeddedHTMLCommentFilteredContents(
+        in document: TextDocument,
+        language: EmbeddedHTMLLanguage
+    ) -> CommentFilteredContents {
+        var contents: [String] = []
+        var commentOnly: [Bool] = []
+        var mode = EmbeddedHTMLMode.html
+        var commentKind: EmbeddedCommentKind?
+        var quote: UInt16?
+        var quoteContext = EmbeddedQuoteContext.html
+        var scriptLineComment = false
+        var scriptPreprocessor = false
+        var scriptCookieNoise = false
+        var smartyHash = false
+        var inElement = false
+        var pendingScript = false
+        var pendingStyle = false
+        var pendingEmbedded = false
+        var aspAliasComment = false
+        contents.reserveCapacity(document.records.count)
+        commentOnly.reserveCapacity(document.records.count)
+
+        for record in document.records {
+            let units = Array(record.content.utf16)
+            var output: [UInt16] = []
+            var index = 0
+            var containedComment = commentKind != nil || scriptLineComment
+            var modeBoundary: Range<Int>?
+            var searchedModeBoundary = false
+            var scriptFirstToken = mode == .script && quote == nil && !scriptPreprocessor && !scriptCookieNoise
+            var embeddedLineComment = false
+            var modeStartIndex = 0
+            var scriptParserRan = false
+            let nulIndex = units.firstIndex(of: 0) ?? units.count
+            var scriptBoundaryCursor = 0
+            var styleBoundaryCursor = 0
+            var questionBoundaryCursor = 0
+            var percentBoundaryCursor = 0
+            var smartyBoundaryCursor = 0
+            smartyHash = false
+
+            if mode == .script, scriptPreprocessor {
+                mode = .html
+                pendingScript = true
+                inElement = true
+                if commentKind == .cBlock { commentKind = .html }
+            }
+
+            while index < units.count {
+                if !searchedModeBoundary {
+                    modeBoundary = switch mode {
+                    case .script:
+                        scriptPreprocessor
+                            ? nil
+                            : Self.nextUTF16Range(
+                                in: units,
+                                token: Array("</script>".utf16),
+                                cursor: &scriptBoundaryCursor,
+                                from: index,
+                                before: nulIndex
+                            )
+                    case .style:
+                        Self.nextUTF16Range(
+                            in: units,
+                            token: Array("</style>".utf16),
+                            cursor: &styleBoundaryCursor,
+                            from: index,
+                            before: nulIndex
+                        )
+                    case .embedded:
+                        language == .smarty
+                            ? Self.nextUTF16Range(
+                                in: units,
+                                token: [125],
+                                cursor: &smartyBoundaryCursor,
+                                from: index,
+                                before: nulIndex
+                            )
+                            : Self.nextEmbeddedCloser(
+                                in: units,
+                                questionCursor: &questionBoundaryCursor,
+                                percentCursor: &percentBoundaryCursor,
+                                from: index,
+                                before: nulIndex
+                            )
+                    case .html:
+                        nil
+                    }
+                    searchedModeBoundary = true
+                }
+                if let boundary = modeBoundary, index == boundary.lowerBound {
+                    let closingMode = mode
+                    if language == .smarty, closingMode == .embedded,
+                       commentKind == .smarty, index > 0, units[index - 1] == 42 {
+                        mode = .html
+                        commentKind = nil
+                        quote = nil
+                        pendingEmbedded = false
+                        index = boundary.upperBound
+                        searchedModeBoundary = false
+                        continue
+                    }
+                    let protected = switch language {
+                    case .asp:
+                        false
+                    case .php:
+                        mode == .embedded && (commentKind == .cBlock || quote != nil)
+                    case .smarty:
+                        mode == .embedded && (commentKind == .smarty || quote == 34)
+                    }
+                    if protected {
+                        if commentKind == nil { output.append(contentsOf: units[boundary]) }
+                        index = boundary.upperBound
+                        modeStartIndex = index
+                        searchedModeBoundary = false
+                        continue
+                    }
+                    mode = .html
+                    commentKind = nil
+                    quote = nil
+                    scriptPreprocessor = false
+                    scriptCookieNoise = false
+                    smartyHash = false
+                    scriptLineComment = false
+                    pendingScript = false
+                    pendingStyle = false
+                    pendingEmbedded = false
+                    if closingMode == .embedded, (embeddedLineComment || aspAliasComment), modeStartIndex > 0 {
+                        output.append(contentsOf: units[(boundary.lowerBound + 1)..<boundary.upperBound])
+                    } else {
+                        output.append(contentsOf: units[boundary])
+                    }
+                    embeddedLineComment = false
+                    aspAliasComment = false
+                    index = boundary.upperBound
+                    searchedModeBoundary = false
+                    continue
+                }
+
+                let character = units[index]
+                if character == 0 {
+                    if mode == .style {
+                        if commentKind == nil { output.append(character) }
+                        index += 1
+                        continue
+                    }
+                    if commentKind == nil && !scriptLineComment && !aspAliasComment {
+                        output.append(contentsOf: units[index...])
+                    }
+                    break
+                }
+                if scriptLineComment {
+                    containedComment = true
+                    index = modeBoundary?.lowerBound ?? units.count
+                    continue
+                }
+                if let activeComment = commentKind {
+                    containedComment = true
+                    let closer: [UInt16] = switch activeComment {
+                    case .html: Array("-->".utf16)
+                    case .cBlock: [42, 47]
+                    case .smarty: [42, 125]
+                    }
+                    if Self.utf16HasPrefix(units, closer, at: index) {
+                        commentKind = nil
+                        index += closer.count
+                        if activeComment == .html {
+                            if pendingScript {
+                                mode = .script
+                            } else if pendingStyle {
+                                mode = .style
+                            } else if pendingEmbedded {
+                                mode = .embedded
+                            }
+                            if mode != .html {
+                                let cookieNoise = mode == .script && (pendingStyle || pendingEmbedded)
+                                if mode == .embedded, language == .asp { aspAliasComment = true }
+                                pendingScript = false
+                                pendingStyle = false
+                                pendingEmbedded = false
+                                scriptCookieNoise = cookieNoise
+                                scriptFirstToken = !cookieNoise
+                                searchedModeBoundary = false
+                                modeStartIndex = index
+                            }
+                        } else if activeComment == .smarty {
+                            mode = .html
+                        }
+                    } else {
+                        index += 1
+                    }
+                    continue
+                }
+                if let activeQuote = quote {
+                    output.append(character)
+                    let closes = quoteContext == .asp
+                        ? character == activeQuote
+                        : character == activeQuote && Self.twoLookbackQuoteCloses(in: units, at: index)
+                    if closes {
+                        quote = nil
+                    }
+                    index += 1
+                    continue
+                }
+
+                switch mode {
+                case .html:
+                    if Self.utf16HasPrefix(units, Array("<!--".utf16), at: index) {
+                        containedComment = true
+                        commentKind = .html
+                        inElement = false
+                        index += 4
+                        if pendingScript {
+                            mode = .script
+                            commentKind = .cBlock
+                        } else if pendingStyle {
+                            mode = .style
+                            commentKind = .cBlock
+                        } else if pendingEmbedded {
+                            mode = .embedded
+                            if language == .php { commentKind = .cBlock }
+                            if language == .smarty { commentKind = .smarty }
+                            if language == .asp {
+                                commentKind = nil
+                                aspAliasComment = true
+                            }
+                        }
+                        if mode != .html {
+                            let cookieNoise = mode == .script && (pendingStyle || pendingEmbedded)
+                            pendingScript = false
+                            pendingStyle = false
+                            pendingEmbedded = false
+                            scriptCookieNoise = cookieNoise
+                            scriptFirstToken = !cookieNoise
+                            searchedModeBoundary = false
+                            modeStartIndex = index
+                        }
+                        continue
+                    }
+                    if character == 60, index + 1 < units.count,
+                        units[index + 1] == 63 || units[index + 1] == 37 {
+                        if inElement {
+                            pendingEmbedded = true
+                        } else {
+                            mode = .embedded
+                            searchedModeBoundary = false
+                            modeStartIndex = index + 1
+                        }
+                        output.append(character)
+                        index += 1
+                        continue
+                    }
+                    if language == .smarty, index + 1 < units.count,
+                        character == 123, units[index + 1] == 42 {
+                        if inElement {
+                            pendingEmbedded = true
+                            output.append(character)
+                            index += 1
+                        } else {
+                            containedComment = true
+                            commentKind = .smarty
+                            mode = .embedded
+                            index += 2
+                            searchedModeBoundary = false
+                            modeStartIndex = index
+                        }
+                        continue
+                    }
+                    if language == .smarty, character == 123,
+                       (index > 0 && !Self.legacyIsWhitespace(units[index - 1]) ||
+                        index + 1 < units.count && !Self.legacyIsWhitespace(units[index + 1])) {
+                        if inElement {
+                            pendingEmbedded = true
+                        } else {
+                            mode = .embedded
+                            searchedModeBoundary = false
+                            modeStartIndex = index + 1
+                        }
+                        output.append(character)
+                        index += 1
+                        continue
+                    }
+                    if language != .smarty, character == 60,
+                       let blockMode = Self.embeddedBlockMode(in: units, at: index) {
+                        if blockMode == .script { pendingScript = true }
+                        if blockMode == .style { pendingStyle = true }
+                    }
+                    if inElement {
+                        if character == 34 || character == 39 &&
+                           (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                            quote = character
+                            quoteContext = .html
+                        }
+                        output.append(character)
+                        index += 1
+                        if character == 62 {
+                            inElement = false
+                            if pendingScript {
+                                mode = .script
+                            } else if pendingStyle {
+                                mode = .style
+                            } else if pendingEmbedded {
+                                mode = .embedded
+                                if quote != nil {
+                                    quoteContext = switch language {
+                                    case .asp: .asp
+                                    case .php: .php
+                                    case .smarty: .smarty
+                                    }
+                                }
+                            }
+                            if mode != .html {
+                                let cookieNoise = mode == .script && (pendingStyle || pendingEmbedded)
+                                pendingScript = false
+                                pendingStyle = false
+                                pendingEmbedded = false
+                                scriptCookieNoise = cookieNoise
+                                scriptFirstToken = mode == .script && quote == nil && !cookieNoise
+                                scriptPreprocessor = false
+                                searchedModeBoundary = false
+                                modeStartIndex = index
+                            }
+                        }
+                        continue
+                    }
+                    if character == 60 { inElement = true }
+                    output.append(character)
+                    index += 1
+
+                case .script:
+                    scriptParserRan = true
+                    if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                        containedComment = true
+                        scriptLineComment = true
+                        index = modeBoundary?.lowerBound ?? units.count
+                        continue
+                    }
+                    if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                        containedComment = true
+                        commentKind = .cBlock
+                        index += 2
+                        continue
+                    }
+                    if scriptPreprocessor {
+                        output.append(character)
+                        index += 1
+                        continue
+                    }
+                    if scriptFirstToken, character == 35 {
+                        scriptPreprocessor = true
+                        output.append(character)
+                        index += 1
+                        continue
+                    }
+                    if character == 34 || character == 39 &&
+                       (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                        quote = character
+                        quoteContext = .script
+                        output.append(character)
+                        index += 1
+                        continue
+                    }
+                    output.append(character)
+                    if !Self.legacyIsWhitespace(character) { scriptFirstToken = false }
+                    index += 1
+
+                case .style:
+                    if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                        containedComment = true
+                        commentKind = .cBlock
+                        index += 2
+                        continue
+                    }
+                    output.append(character)
+                    index += 1
+
+                case .embedded:
+                    switch language {
+                    case .asp:
+                        if character == 39 {
+                            containedComment = true
+                            embeddedLineComment = true
+                            index = modeBoundary?.lowerBound ?? units.count
+                            continue
+                        }
+                        if character == 34 {
+                            quote = character
+                            quoteContext = .asp
+                        }
+                        if aspAliasComment, quote == nil {
+                            index += 1
+                            continue
+                        }
+                    case .php:
+                        if character == 35 || index + 1 < units.count && character == 47 && units[index + 1] == 47 {
+                            containedComment = true
+                            embeddedLineComment = true
+                            index = modeBoundary?.lowerBound ?? units.count
+                            continue
+                        }
+                        if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                            containedComment = true
+                            commentKind = .cBlock
+                            index += 2
+                            continue
+                        }
+                        if character == 34 || character == 39 &&
+                           (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                            quote = character
+                            quoteContext = .php
+                        }
+                    case .smarty:
+                        if smartyHash {
+                            output.append(character)
+                            if character == 35, Self.twoLookbackQuoteCloses(in: units, at: index) {
+                                smartyHash = false
+                            }
+                            index += 1
+                            continue
+                        }
+                        if index + 1 < units.count, character == 123, units[index + 1] == 42 {
+                            containedComment = true
+                            commentKind = .smarty
+                            index += 2
+                            continue
+                        }
+                        if character == 35 {
+                            smartyHash = true
+                            output.append(character)
+                            index += 1
+                            continue
+                        }
+                        if character == 34 || character == 39 &&
+                           (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                            quote = character
+                            quoteContext = .smarty
+                        }
+                    }
+                    output.append(character)
+                    index += 1
+                }
+            }
+
+            smartyHash = false
+            scriptLineComment = false
+            if mode == .script {
+                if scriptParserRan, units.last != 92 {
+                    scriptPreprocessor = false
+                    scriptCookieNoise = false
+                    if quoteContext == .script { quote = nil }
+                }
+            } else if !(mode == .html && pendingScript && inElement) {
+                scriptPreprocessor = false
+                scriptCookieNoise = false
+            }
+            if let activeQuote = quote {
+                switch quoteContext {
+                case .html:
+                    let preservesPendingEmbeddedQuote = pendingEmbedded && language != .asp
+                    if !preservesPendingEmbeddedQuote && (activeQuote != 34 || units.isEmpty) { quote = nil }
+                case .script:
+                    if activeQuote != 34 || units.last != 92 { quote = nil }
+                case .php, .smarty:
+                    if mode != .embedded { quote = nil }
+                case .asp, .style:
+                    quote = nil
+                }
+            }
+            let outputText = String(decoding: output, as: UTF16.self)
+            contents.append(outputText)
+            commentOnly.append(Self.isWholeCommentLine(containedComment, output: outputText, record: record))
+        }
+        return CommentFilteredContents(contents: contents, commentOnly: commentOnly)
+    }
+
+    private static func utf16HasPrefix(_ units: [UInt16], _ prefix: [UInt16], at index: Int) -> Bool {
+        index + prefix.count <= units.count && units[index..<(index + prefix.count)].elementsEqual(prefix)
+    }
+
+    private static func embeddedBlockMode(in units: [UInt16], at index: Int) -> EmbeddedHTMLMode? {
+        guard units[index] == 60 else { return nil }
+        var end = index + 1
+        while end < units.count, legacyIsAlphanumeric(units[end]) || units[end] == 46 { end += 1 }
+        if utf16HasPrefix(units, Array("<!--".utf16), at: end) ||
+            utf16HasPrefix(units, [60, 63], at: end) ||
+            utf16HasPrefix(units, [60, 37], at: end) {
+            return nil
+        }
+        let identifier = String(decoding: units[(index + 1)..<end], as: UTF16.self).lowercased()
+        if identifier == "script" { return .script }
+        if identifier == "style" { return .style }
+        return nil
+    }
+
+    private static func nextUTF16Range(
+        in units: [UInt16],
+        token: [UInt16],
+        cursor: inout Int,
+        from start: Int,
+        before end: Int
+    ) -> Range<Int>? {
+        cursor = max(cursor, start)
+        guard !token.isEmpty, cursor + token.count <= end else { return nil }
+        while cursor + token.count <= end {
+            if utf16HasPrefix(units, token, at: cursor) {
+                let range = cursor..<(cursor + token.count)
+                cursor = range.upperBound
+                return range
+            }
+            cursor += 1
+        }
+        return nil
+    }
+
+    private static func nextEmbeddedCloser(
+        in units: [UInt16],
+        questionCursor: inout Int,
+        percentCursor: inout Int,
+        from start: Int,
+        before end: Int
+    ) -> Range<Int>? {
+        nextUTF16Range(in: units, token: [63, 62], cursor: &questionCursor, from: start, before: end) ??
+            nextUTF16Range(in: units, token: [37, 62], cursor: &percentCursor, from: start, before: end)
     }
 
     private func matlabCommentFilteredContents(in document: TextDocument) -> CommentFilteredContents {

@@ -615,6 +615,9 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(CommentSyntax(fileExtension: "au3"), .autoIt)
         XCTAssertEqual(CommentSyntax(fileExtension: "FSX"), .fsharp)
         XCTAssertNil(CommentSyntax(fileExtension: "fsi"))
+        XCTAssertEqual(CommentSyntax(fileExtension: "ascx"), .asp)
+        XCTAssertEqual(CommentSyntax(fileExtension: "PHP5"), .php)
+        XCTAssertEqual(CommentSyntax(fileExtension: "tpl"), .smarty)
         XCTAssertNil(CommentSyntax(fileExtension: "mjs"))
         XCTAssertNil(CommentSyntax(fileExtension: "f95"))
         XCTAssertNil(CommentSyntax(fileExtension: "sv"))
@@ -1461,6 +1464,254 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: overlappingTriple).differences, 0)
         XCTAssertEqual(DiffSummary(rows: guardedTriple).differences, 0)
         XCTAssertEqual(DiffSummary(rows: preprocessorParenStar).differences, 0)
+    }
+
+    func testPhpEmbeddedCommentsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+        let comments = try LineDiff.compare(
+            left: "<p>x</p><?php // left\n/* old */ $value; ?>",
+            right: "<p>x</p><?php // right\n/* new */ $value; ?>",
+            options: options
+        )
+        let hash = try LineDiff.compare(
+            left: "<?php $value; # left ?>tail",
+            right: "<?php $value; # right ?>tail",
+            options: options
+        )
+        let blockProtectedCloser = try LineDiff.compare(
+            left: "<?php /* ?> left */ $value; ?>",
+            right: "<?php /* ?> right */ $value; ?>",
+            options: options
+        )
+        let stringProtectedCloser = try LineDiff.compare(
+            left: "<?php \"?> left\"; ?>",
+            right: "<?php \"?> right\"; ?>",
+            options: options
+        )
+        let htmlComment = try LineDiff.compare(
+            left: "<!-- left --><p>x</p>",
+            right: "<!-- right --><p>x</p>",
+            options: options
+        )
+        let embeddedNul = try LineDiff.compare(
+            left: "<?php value\0// left ?>",
+            right: "<?php value\0// right ?>",
+            options: options
+        )
+        let attributeEmbeddedOpener = try LineDiff.compare(
+            left: "<div data=<?php // left ?>>",
+            right: "<div data=<?php // right ?>>",
+            options: options
+        )
+        let overlappingCloser = try LineDiff.compare(
+            left: "<?># left",
+            right: "<?># right",
+            options: options
+        )
+        let lineCommentBoundary = try LineDiff.compare(
+            left: "<?php // comment ?>left",
+            right: "<?php // comment ?>right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: hash).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: blockProtectedCloser).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: stringProtectedCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: htmlComment).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: attributeEmbeddedOpener).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: overlappingCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: lineCommentBoundary).differences, 1)
+    }
+
+    func testAspEmbeddedCommentsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .asp)
+        let comments = try LineDiff.compare(
+            left: "<% value ' left %>tail",
+            right: "<% value ' right %>tail",
+            options: options
+        )
+        let stringDoesNotProtectCloser = try LineDiff.compare(
+            left: "<% value = \"%>left\" %>",
+            right: "<% value = \"%>right\" %>",
+            options: options
+        )
+        let phpStyleCloser = try LineDiff.compare(
+            left: "<% value ' left ?>tail",
+            right: "<% value ' right ?>tail",
+            options: options
+        )
+        let lineCommentBoundary = try LineDiff.compare(
+            left: "<% ' comment %>left",
+            right: "<% ' comment %>right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: stringDoesNotProtectCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: phpStyleCloser).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: lineCommentBoundary).differences, 1)
+    }
+
+    func testSmartyEmbeddedCommentsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .smarty)
+        let comments = try LineDiff.compare(
+            left: "<p>{* left *}</p>",
+            right: "<p>{* right *}</p>",
+            options: options
+        )
+        let whitespaceBraces = try LineDiff.compare(
+            left: "<p>{ value left }</p>",
+            right: "<p>{ value right }</p>",
+            options: options
+        )
+        let doubleQuoteProtectsCloser = try LineDiff.compare(
+            left: "{\"} left\"}",
+            right: "{\"} right\"}",
+            options: options
+        )
+        let singleQuoteDoesNotProtectCloser = try LineDiff.compare(
+            left: "{'} left'}",
+            right: "{'} right'}",
+            options: options
+        )
+        let hashVariable = try LineDiff.compare(
+            left: "{#left#}",
+            right: "{#right#}",
+            options: options
+        )
+        let hashStateIsRecordLocal = try LineDiff.compare(
+            left: "{#value\n{* left *}#}",
+            right: "{#value\n{* right *}#}",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: whitespaceBraces).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: doubleQuoteProtectsCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: singleQuoteDoesNotProtectCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: hashVariable).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: hashStateIsRecordLocal).differences, 0)
+    }
+
+    func testEmbeddedScriptAndStyleCommentsMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+        let script = try LineDiff.compare(
+            left: "<script>value(); // left\n</script>",
+            right: "<script>value(); // right\n</script>",
+            options: options
+        )
+        let style = try LineDiff.compare(
+            left: "<style>value {/* left */ color:red}</style>",
+            right: "<style>value {/* right */ color:red}</style>",
+            options: options
+        )
+        let uppercaseCloser = try LineDiff.compare(
+            left: "<script>// old\n</SCRIPT> left",
+            right: "<script>// new\n</SCRIPT> right",
+            options: options
+        )
+        let styleAfterNul = try LineDiff.compare(
+            left: "<style>\0/* left */",
+            right: "<style>\0/* right */",
+            options: options
+        )
+        let htmlCommentClearsElement = try LineDiff.compare(
+            left: "<tag <!--x -->\"<!-- left -->\"",
+            right: "<tag <!--x -->\"<!-- right -->\"",
+            options: options
+        )
+        let dottedScriptTag = try LineDiff.compare(
+            left: "<script.foo>// left</script.foo>",
+            right: "<script.foo>// right</script.foo>",
+            options: options
+        )
+        let underscoredScriptTag = try LineDiff.compare(
+            left: "<script_foo>// left</script_foo>",
+            right: "<script_foo>// right</script_foo>",
+            options: options
+        )
+        let scriptLineCommentBoundary = try LineDiff.compare(
+            left: "<script>// comment</script>left",
+            right: "<script>// comment</script>right",
+            options: options
+        )
+        let scriptPreprocessor = try LineDiff.compare(
+            left: "<script># \" // left</script>",
+            right: "<script># \" // right</script>",
+            options: options
+        )
+        let htmlMultilineString = try LineDiff.compare(
+            left: "<tag value=\"\n<!-- left -->\">",
+            right: "<tag value=\"\n<!-- right -->\">",
+            options: options
+        )
+        let scriptMultilineString = try LineDiff.compare(
+            left: "<script>\"\\\n// left\"</script>",
+            right: "<script>\"\\\n// right\"</script>",
+            options: options
+        )
+        let scriptSingleQuoteIsRecordLocal = try LineDiff.compare(
+            left: "<script>'\\\n// left</script>",
+            right: "<script>'\\\n// right</script>",
+            options: options
+        )
+        let scriptLineCommentIsRecordLocal = try LineDiff.compare(
+            left: "<script>// comment\\\nleft</script>",
+            right: "<script>// comment\\\nright</script>",
+            options: options
+        )
+        let scriptPreprocessorCarriesAfterBackslash = try LineDiff.compare(
+            left: "<script># value\\\n// left</script>",
+            right: "<script># value\\\n// right</script>",
+            options: options
+        )
+        let commentActivatesPendingScript = try LineDiff.compare(
+            left: "<script <!--x -->// left",
+            right: "<script <!--x -->// right",
+            options: options
+        )
+        let scriptPrecedesEmbedded = try LineDiff.compare(
+            left: "<script x=<?php ?>># left</script>",
+            right: "<script x=<?php ?>># right</script>",
+            options: options
+        )
+        let nestedUnquotedScript = try LineDiff.compare(
+            left: "<x <script>// left</script>",
+            right: "<x <script>// right</script>",
+            options: options
+        )
+        let scriptSpecialOpenerWins = try LineDiff.compare(
+            left: "<script<!--x -->// left",
+            right: "<script<!--x -->// right",
+            options: options
+        )
+        let commentPreservesFirstToken = try LineDiff.compare(
+            left: "<script>/*x*/# value // left</script>",
+            right: "<script>/*x*/# value // right</script>",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: script).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: style).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: uppercaseCloser).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: styleAfterNul).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: htmlCommentClearsElement).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: dottedScriptTag).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: underscoredScriptTag).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: scriptLineCommentBoundary).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: scriptPreprocessor).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: htmlMultilineString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: scriptMultilineString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: scriptSingleQuoteIsRecordLocal).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: scriptLineCommentIsRecordLocal).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: scriptPreprocessorCarriesAfterBackslash).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: commentActivatesPendingScript).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: scriptPrecedesEmbedded).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: nestedUnquotedScript).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: scriptSpecialOpenerWins).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: commentPreservesFirstToken).differences, 0)
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {

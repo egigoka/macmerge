@@ -408,6 +408,9 @@ private func validateComparisonSemantics() throws {
         ("value \" left", "value \" right", .abap, "ABAP comments"),
         ("value ; left", "value ; right", .autoIt, "AutoIt comments"),
         ("value // left", "value // right", .fsharp, "F# comments"),
+        ("<% value ' left %>", "<% value ' right %>", .asp, "ASP comments"),
+        ("<?php value // left ?>", "<?php value // right ?>", .php, "PHP comments"),
+        ("{* left *}", "{* right *}", .smarty, "Smarty comments"),
     ]
     for (left, right, syntax, name) in syntaxComments {
         let rows = try LineDiff.compare(
@@ -576,6 +579,50 @@ private func validateComparisonSemantics() throws {
           DiffSummary(rows: autoItBlock).differences == 0,
           DiffSummary(rows: fsharpRaw).differences == 0 else {
         throw BenchmarkError.semanticCheckFailed("ABAP/AutoIt/F# syntax preservation")
+    }
+    let phpStringCloser = try LineDiff.compare(
+        left: "<?php \"?> left\"; ?>",
+        right: "<?php \"?> right\"; ?>",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+    )
+    let smartyWhitespace = try LineDiff.compare(
+        left: "{ value left }",
+        right: "{ value right }",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .smarty)
+    )
+    let aspStringCloser = try LineDiff.compare(
+        left: "<% value = \"%>left\" %>",
+        right: "<% value = \"%>right\" %>",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .asp)
+    )
+    let phpLineCommentBoundary = try LineDiff.compare(
+        left: "<?php // comment ?>left",
+        right: "<?php // comment ?>right",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+    )
+    let smartyHashState = try LineDiff.compare(
+        left: "{#value\n{* left *}#}",
+        right: "{#value\n{* right *}#}",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .smarty)
+    )
+    let scriptPreprocessor = try LineDiff.compare(
+        left: "<script># \" // left</script>",
+        right: "<script># \" // right</script>",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+    )
+    let styleAfterNul = try LineDiff.compare(
+        left: "<style>\0/* left */",
+        right: "<style>\0/* right */",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .php)
+    )
+    guard DiffSummary(rows: phpStringCloser).differences == 1,
+          DiffSummary(rows: smartyWhitespace).differences == 1,
+          DiffSummary(rows: aspStringCloser).differences == 1,
+          DiffSummary(rows: phpLineCommentBoundary).differences == 1,
+          DiffSummary(rows: smartyHashState).differences == 0,
+          DiffSummary(rows: scriptPreprocessor).differences == 0,
+          DiffSummary(rows: styleAfterNul).differences == 0 else {
+        throw BenchmarkError.semanticCheckFailed("embedded language boundaries")
     }
     let markupProse = try LineDiff.compare(
         left: "don't <!-- left --> change",

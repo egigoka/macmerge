@@ -16,7 +16,10 @@ let package = Package(
         .target(
             name: "CXDiff",
             path: "Sources/CXDiff",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .define("DEBUG", .when(configuration: .debug))
+            ]
         ),
         .target(
             name: "MacMergeCore",
@@ -33,7 +36,10 @@ let package = Package(
         ),
         .testTarget(
             name: "MacMergeCoreTests",
-            dependencies: ["MacMergeCore", "CXDiff"]
+            dependencies: ["MacMergeCore", "CXDiff"],
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-DDEBUG"], .when(configuration: .debug))
+            ]
         ),
         .testTarget(
             name: "MacMergeAppTests",
