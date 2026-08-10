@@ -22,6 +22,7 @@ trace_pid=""
 app_pid=""
 existing_pid=""
 toc=""
+signposts=""
 cleanup_apps=0
 owned_app_pids=()
 watchdog_pid=""
@@ -167,10 +168,45 @@ has_target=$(xmllint --xpath \
 has_time_profile=$(xmllint --xpath \
     'boolean(/trace-toc/run/data/table[@schema="time-profile"])' \
     - <<<"$toc" 2>/dev/null || true)
-if [[ "$has_target" != true || "$has_time_profile" != true ]]; then
-    echo "Instruments trace does not contain a launched MacMerge Time Profiler run." >&2
+has_signposts=$(xmllint --xpath \
+    'boolean(/trace-toc/run/data/table[@schema="os-signpost"])' \
+    - <<<"$toc" 2>/dev/null || true)
+if [[ "$has_target" != true || "$has_time_profile" != true || "$has_signposts" != true ]]; then
+    echo "Instruments trace does not contain MacMerge Time Profiler and signpost data." >&2
     exit 1
 fi
+signposts=$(xcrun xctrace export \
+    --input "$trace" \
+    --xpath '/trace-toc/run[@number="1"]/data/table[@schema="os-signpost"]')
+subsystem_id=$(xmllint --xpath \
+    'string((//subsystem[@fmt="io.github.egigoka.MacMerge"])[1]/@id)' \
+    - <<<"$signposts" 2>/dev/null || true)
+if [[ -z "$subsystem_id" ]]; then
+    echo "Instruments signpost export does not contain MacMerge events." >&2
+    exit 1
+fi
+end_event_id=$(xmllint --xpath \
+    'string((//event-type[@fmt="End"])[1]/@id)' \
+    - <<<"$signposts" 2>/dev/null || true)
+begin_event_id=$(xmllint --xpath \
+    'string((//event-type[@fmt="Begin"])[1]/@id)' \
+    - <<<"$signposts" 2>/dev/null || true)
+for interval in LoadPair Comparison FirstVisibleRow AutoScroll; do
+    name_id=$(xmllint --xpath \
+        "string((//signpost-name[@fmt='$interval'])[1]/@id)" \
+        - <<<"$signposts" 2>/dev/null || true)
+    begin="(//row[(event-type/@fmt='Begin' or event-type/@ref='$begin_event_id') and (signpost-name/@fmt='$interval' or signpost-name/@ref='$name_id') and (subsystem/@fmt='io.github.egigoka.MacMerge' or subsystem/@ref='$subsystem_id')])[1]"
+    identifier_id=$(xmllint --xpath \
+        "string(($begin/os-signpost-identifier/@id | $begin/os-signpost-identifier/@ref)[1])" \
+        - <<<"$signposts" 2>/dev/null || true)
+    has_end=$(xmllint --xpath \
+        "boolean(//row[(event-type/@fmt='End' or event-type/@ref='$end_event_id') and (signpost-name/@fmt='$interval' or signpost-name/@ref='$name_id') and (os-signpost-identifier/@id='$identifier_id' or os-signpost-identifier/@ref='$identifier_id') and (subsystem/@fmt='io.github.egigoka.MacMerge' or subsystem/@ref='$subsystem_id')])" \
+        - <<<"$signposts" 2>/dev/null || true)
+    if [[ -z "$name_id" || -z "$identifier_id" || "$has_end" != true ]]; then
+        echo "Instruments trace is missing a completed $interval interval." >&2
+        exit 1
+    fi
+done
 if [[ ! -s "$report" ]] || [[ $(plutil -extract complete raw "$report" 2>/dev/null || true) != 1 ]]; then
     echo "Traced app did not complete packaged performance workflow." >&2
     exit 1

@@ -739,7 +739,7 @@ private struct ComparisonRenderResult: Sendable {
     let rows: [DiffRow]
     let maximumLineColumns: Int
     let differenceLocations: DifferenceLocations
-    let differenceRowIndices: [Int]
+    let differenceRowIndices: [UInt32]
     let summary: DiffSummary
 }
 
@@ -758,7 +758,7 @@ struct DifferenceLocations: Sendable {
         rowIndices = []
     }
 
-    init(rows: [DiffRow], differenceRowIndices: [Int]) {
+    init(rows: [DiffRow], differenceRowIndices: [UInt32]) {
         guard !differenceRowIndices.isEmpty else {
             keys = []
             rowIndices = []
@@ -769,7 +769,7 @@ struct DifferenceLocations: Sendable {
         keys = Array(repeating: 0, count: capacity)
         rowIndices = Array(repeating: 0, count: capacity)
         for rowIndex in differenceRowIndices {
-            insert(rows[rowIndex].id, rowIndex: rowIndex)
+            insert(rows[Int(rowIndex)].id, rowIndex: rowIndex)
         }
     }
 
@@ -792,8 +792,8 @@ struct DifferenceLocations: Sendable {
             rowIndices.count * MemoryLayout<UInt32>.stride
     }
 
-    private mutating func insert(_ id: DiffRow.ID, rowIndex: Int) {
-        guard let key = Self.key(for: id), let rowIndex = UInt32(exactly: rowIndex) else {
+    private mutating func insert(_ id: DiffRow.ID, rowIndex: UInt32) {
+        guard let key = Self.key(for: id) else {
             preconditionFailure("Difference location exceeds comparison limits")
         }
         var slot = Self.hash(key) & (keys.count - 1)
@@ -843,7 +843,7 @@ private func computeComparison(
 ) throws -> ComparisonRenderResult {
     let rows = try LineDiff.compare(left: left, right: right, options: options)
     var maximumLineColumns = 0
-    var differenceRowIndices: [Int] = []
+    var differenceRowIndices: [UInt32] = []
     for (index, row) in rows.enumerated() {
         maximumLineColumns = max(
             maximumLineColumns,
@@ -851,7 +851,10 @@ private func computeComparison(
             row.right.map { displayColumnCount($0.text) } ?? 0
         )
         if row.kind != .unchanged {
-            differenceRowIndices.append(index)
+            guard let rowIndex = UInt32(exactly: index) else {
+                preconditionFailure("Difference row exceeds comparison limits")
+            }
+            differenceRowIndices.append(rowIndex)
         }
     }
     let differenceLocations = DifferenceLocations(
@@ -943,7 +946,7 @@ final class ComparisonModel {
     }
     private(set) var maximumLineColumns = 0
     private(set) var differenceLocations = DifferenceLocations()
-    private(set) var differenceRowIndices: [Int] = []
+    private(set) var differenceRowIndices: [UInt32] = []
     private(set) var summary = DiffSummary(rows: [])
     private(set) var selectedDifferenceID: DiffRow.ID?
     private(set) var currentRowID: DiffRow.ID?
@@ -1905,13 +1908,13 @@ final class ComparisonModel {
 
     private func differenceID(at position: Int) -> DiffRow.ID? {
         guard differenceRowIndices.indices.contains(position) else { return nil }
-        let rowIndex = differenceRowIndices[position]
+        let rowIndex = Int(differenceRowIndices[position])
         return rows.indices.contains(rowIndex) ? rows[rowIndex].id : nil
     }
 
     private func orderedDifferencePosition(forRowIndex rowIndex: Int) -> Int? {
         let position = differenceInsertionIndex(forRowIndex: rowIndex)
-        return differenceRowIndices.indices.contains(position) && differenceRowIndices[position] == rowIndex
+        return differenceRowIndices.indices.contains(position) && Int(differenceRowIndices[position]) == rowIndex
             ? position
             : nil
     }
@@ -1921,7 +1924,7 @@ final class ComparisonModel {
         var upper = differenceRowIndices.endIndex
         while lower < upper {
             let middle = lower + (upper - lower) / 2
-            if differenceRowIndices[middle] < rowIndex {
+            if Int(differenceRowIndices[middle]) < rowIndex {
                 lower = middle + 1
             } else {
                 upper = middle

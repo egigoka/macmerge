@@ -36,7 +36,7 @@ Acceptance: user can open two files, apply individual changes in either directio
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
 - [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
-- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, compact difference-location hashing, allocation-free editable sentinel, direct document-record comparison, and compact ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use 247 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, compact difference-location hashing, allocation-free editable sentinel, direct document-record comparison, and UInt32 ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use about 249 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -474,7 +474,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ### Performance and UI integration tests
 
-- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets, and captures an Instruments trace when full Xcode provides `xctrace`; 4 KiB long-line, tab-heavy, and wide-Unicode fixtures also run in CI; exported validation of completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals remains pending.
+- [x] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets, captures an Instruments trace when full Xcode provides `xctrace`, and validates exported completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals; 4 KiB long-line, tab-heavy, and wide-Unicode fixtures also run in CI.
 - [x] Dense difference sets, 4 KiB long lines, tab-heavy rows, and wide-Unicode rows have deterministic core fixtures, packaged-harness support, and CI coverage.
 - [ ] Assert comparison and render metadata stay off the main actor.
 - [ ] Assert stale canceled comparisons cannot publish over newer input.
@@ -494,7 +494,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 ## Milestone 7: Release engineering
 
 - [-] Add CI for tests, release builds, formatting, and static analysis (tests, strict builds, xdiff path coverage, and package artifact complete).
-- [-] Add performance and memory regression suites: deterministic xdiff allocation-failure sweep, CI Address Sanitizer, 10k-to-1M release comparison benchmarks, packaged 1M-row UI/memory budgets, and conditional full-Xcode Instruments trace artifacts exist; trace-interval export validation remains pending.
+- [x] Add performance and memory regression suites: deterministic xdiff allocation-failure sweep, CI Address Sanitizer, 10k-to-1M release comparison benchmarks, packaged 1M-row UI/memory budgets, conditional full-Xcode Instruments trace artifacts, and completed signpost-interval export validation exist.
 - [ ] Add crash reporting and privacy documentation.
 - [ ] Configure sandbox entitlements and persistent security-scoped bookmarks.
 - [ ] Sign, notarize, package, and exercise updates on supported macOS versions.
@@ -502,7 +502,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Continue reducing materialized 1M-row storage after packed rows and compact difference-location hashing; dense, 4 KiB, tab-heavy, and wide-Unicode benchmarks are complete.
+1. Continue reducing materialized 1M-row storage after packed rows, compact difference-location hashing, and UInt32 ordered indices; dense, 4 KiB, tab-heavy, and wide-Unicode benchmarks are complete.
 2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
 3. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
 4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.

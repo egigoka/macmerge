@@ -47,4 +47,4 @@ Capture the same workflow with Instruments and `LoadPair`, `Comparison`, `FirstV
 Scripts/run-performance-trace.sh
 ```
 
-The trace harness requires a full Xcode installation with `xctrace`. It records for 20 seconds by default without applying non-instrumented performance budgets. Override `TRACE_PATH`, `TRACE_TEMPLATE`, `TRACE_TIME_LIMIT`, or `LINE_COUNT` as needed.
+The trace harness requires a full Xcode installation with `xctrace`. It records for 20 seconds by default, exports the signpost table, and verifies completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals without applying non-instrumented performance budgets. Override `TRACE_PATH`, `TRACE_TEMPLATE`, `TRACE_TIME_LIMIT`, or `LINE_COUNT` as needed.

@@ -16,7 +16,7 @@ final class ComparisonModelTests: XCTestCase {
                 kind: .modified
             )
         }
-        let rowIndices = Array(rows.indices)
+        let rowIndices = rows.indices.map(UInt32.init)
 
         let locations = DifferenceLocations(rows: rows, differenceRowIndices: rowIndices)
 
