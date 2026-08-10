@@ -7,6 +7,9 @@ public enum TextFileEncoding: String, Equatable, Sendable {
     case shiftJIS
     case japaneseEUC
     case iso2022JP
+    case windows1250
+    case windows1251
+    case windows1252
 
     public var displayName: String {
         switch self {
@@ -22,6 +25,12 @@ public enum TextFileEncoding: String, Equatable, Sendable {
             "EUC-JP (CP51932)"
         case .iso2022JP:
             "ISO-2022-JP (CP50220)"
+        case .windows1250:
+            "Central European (CP1250)"
+        case .windows1251:
+            "Cyrillic (CP1251)"
+        case .windows1252:
+            "Western European (CP1252)"
         }
     }
 }
@@ -62,7 +71,7 @@ public enum TextFileCodecError: Error, LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidTextEncoding:
-            "File encoding is unsupported or ambiguous. Supported legacy encodings are CP932, CP51932, and CP50220."
+            "File encoding is unsupported or ambiguous. Supported legacy encodings are CP932, CP51932, CP50220, CP1250, CP1251, and CP1252."
         case .missingUTF16ByteOrderMark:
             "UTF-16 byte order is ambiguous because the file has no byte-order mark."
         case .unsupportedUTF32:
@@ -151,6 +160,11 @@ public enum TextFileCodec {
                 legacyCandidates.append(document)
             }
         }
+        for encoding in [TextFileEncoding.windows1250, .windows1251, .windows1252] {
+            if let document = decodeLegacy(data, encoding: encoding) {
+                legacyCandidates.append(document)
+            }
+        }
 
         if let utf8Candidate {
             return utf8Candidate
@@ -159,12 +173,16 @@ public enum TextFileCodec {
         guard let first = legacyCandidates.first else {
             throw TextFileCodecError.invalidTextEncoding
         }
+        if legacyCandidates.count == 1 { return first }
         let distinctTexts = legacyCandidates.reduce(into: [String]()) { texts, candidate in
             if !texts.contains(where: { scalarsEqual($0, candidate.text) }) {
                 texts.append(candidate.text)
             }
         }
-        if distinctTexts.count == 1 {
+        let hasWindowsCodepage = legacyCandidates.contains {
+            windowsStringEncoding(for: $0.encoding) != nil
+        }
+        if distinctTexts.count == 1, !hasWindowsCodepage {
             return first
         }
         throw TextFileCodecError.ambiguousTextEncoding(legacyCandidates.map(\.encoding))
@@ -199,7 +217,7 @@ public enum TextFileCodec {
                 hasByteOrderMark: hasBOM,
                 originalData: data
             )
-        case .shiftJIS, .japaneseEUC, .iso2022JP:
+        case .shiftJIS, .japaneseEUC, .iso2022JP, .windows1250, .windows1251, .windows1252:
             guard let document = decodeLegacy(data, encoding: encoding) else {
                 throw TextFileCodecError.invalidTextEncoding
             }
@@ -233,11 +251,20 @@ public enum TextFileCodec {
         case .iso2022JP:
             stringEncoding = .iso2022JP
             byteOrderMark = Data()
+        case .windows1250:
+            stringEncoding = .windowsCP1250
+            byteOrderMark = Data()
+        case .windows1251:
+            stringEncoding = .windowsCP1251
+            byteOrderMark = Data()
+        case .windows1252:
+            stringEncoding = .windowsCP1252
+            byteOrderMark = Data()
         }
 
         let payload: Data
         switch document.encoding {
-        case .shiftJIS, .japaneseEUC, .iso2022JP:
+        case .shiftJIS, .japaneseEUC, .iso2022JP, .windows1250, .windows1251, .windows1252:
             guard let encoded = encodeLegacy(document.text, encoding: document.encoding) else {
                 throw TextFileCodecError.encodingFailed(document.encoding)
             }
@@ -275,6 +302,12 @@ public enum TextFileCodec {
             stringEncoding = .japaneseEUC
         case .iso2022JP:
             stringEncoding = .iso2022JP
+        case .windows1250:
+            stringEncoding = .windowsCP1250
+        case .windows1251:
+            stringEncoding = .windowsCP1251
+        case .windows1252:
+            stringEncoding = .windowsCP1252
         }
 
         guard let text = String(data: Data(data), encoding: stringEncoding) else {
@@ -426,6 +459,12 @@ public enum TextFileCodec {
             text = eucJPToShiftJIS(data).flatMap { String(data: $0, encoding: .shiftJIS) }
         case .iso2022JP:
             text = iso2022JPToShiftJIS(data).flatMap { String(data: $0, encoding: .shiftJIS) }
+        case .windows1250:
+            text = String(data: data, encoding: .windowsCP1250)
+        case .windows1251:
+            text = String(data: data, encoding: .windowsCP1251)
+        case .windows1252:
+            text = String(data: data, encoding: .windowsCP1252)
         case .utf8, .utf16LittleEndian, .utf16BigEndian:
             return nil
         }
@@ -443,6 +482,14 @@ public enum TextFileCodec {
     }
 
     private static func encodeLegacy(_ text: String, encoding: TextFileEncoding) -> Data? {
+        if let windowsEncoding = windowsStringEncoding(for: encoding) {
+            guard let data = text.data(using: windowsEncoding, allowLossyConversion: false),
+                  let roundTrip = String(data: data, encoding: windowsEncoding),
+                  scalarsEqual(roundTrip, text) else {
+                return nil
+            }
+            return data
+        }
         let encodedText = encoding == .iso2022JP ? fullwidthKatakana(in: text) : text
         guard let shiftJIS = encodedText.data(using: .shiftJIS, allowLossyConversion: false),
               isValidShiftJIS(shiftJIS),
@@ -459,7 +506,7 @@ public enum TextFileCodec {
             data = shiftJISToEUCJP(shiftJIS)
         case .iso2022JP:
             data = shiftJISToISO2022JP(shiftJIS)
-        case .utf8, .utf16LittleEndian, .utf16BigEndian:
+        case .utf8, .utf16LittleEndian, .utf16BigEndian, .windows1250, .windows1251, .windows1252:
             return nil
         }
 
@@ -470,6 +517,15 @@ public enum TextFileCodec {
             return nil
         }
         return data
+    }
+
+    private static func windowsStringEncoding(for encoding: TextFileEncoding) -> String.Encoding? {
+        switch encoding {
+        case .windows1250: .windowsCP1250
+        case .windows1251: .windowsCP1251
+        case .windows1252: .windowsCP1252
+        default: nil
+        }
     }
 
     private static func fullwidthKatakana(in text: String) -> String {
@@ -517,6 +573,8 @@ public enum TextFileCodec {
             return isValidEUCJP(data)
         case .iso2022JP:
             return iso2022JPToShiftJIS(data) != nil
+        case .windows1250, .windows1251, .windows1252:
+            return true
         case .utf8, .utf16LittleEndian, .utf16BigEndian:
             return false
         }

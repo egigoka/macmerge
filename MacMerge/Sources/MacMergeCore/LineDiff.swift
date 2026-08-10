@@ -801,8 +801,14 @@ private struct ComparisonTransform {
     private let lineFilters: [CompiledRule]
     private let substitutions: [CompiledRule]
     private let commentSyntax: CommentSyntax?
+    private let ignoresBlankLines: Bool
+    private var prefixesContent: Bool {
+        commentSyntax != nil || !lineFilters.isEmpty || !substitutions.isEmpty
+    }
 
-    var isActive: Bool { commentSyntax != nil || !lineFilters.isEmpty || !substitutions.isEmpty }
+    var isActive: Bool {
+        ignoresBlankLines || commentSyntax != nil || !lineFilters.isEmpty || !substitutions.isEmpty
+    }
 
     init(options: LineDiffOptions) throws {
         lineFilters = try (options.lineFiltersEnabled ? options.lineFilters : []).map {
@@ -831,6 +837,7 @@ private struct ComparisonTransform {
             )
         }
         commentSyntax = options.ignoreComments ? options.commentSyntax : nil
+        ignoresBlankLines = options.ignoreBlankLines
     }
 
     func prepare(
@@ -904,15 +911,18 @@ private struct ComparisonTransform {
         }
         var comparisonBytes: [UInt8] = []
         comparisonBytes.reserveCapacity(transformedBytes.count + transformedRecords.count * 2)
-        for ((content, terminator), isFiltered) in zip(transformedRecords, filteredLines) {
+        for (index, record) in transformedRecords.enumerated() {
+            let (content, terminator) = record
+            let isFiltered = filteredLines[index]
             if isFiltered {
                 comparisonBytes.append(contentsOf: marker.utf8)
                 comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
                 continue
             }
             let preservesBlankLine = options.ignoreBlankLines &&
-                content.allSatisfy { $0 == 32 || $0 == 9 }
-            if !preservesBlankLine { comparisonBytes.append(contentsOf: [85, 58]) }
+                content.allSatisfy { $0 == 32 || (9...13).contains($0) }
+            if preservesBlankLine { filteredLines[index] = true }
+            if !preservesBlankLine, prefixesContent { comparisonBytes.append(contentsOf: [85, 58]) }
             comparisonBytes.append(contentsOf: content)
             comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
         }

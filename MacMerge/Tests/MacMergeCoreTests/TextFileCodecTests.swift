@@ -73,10 +73,24 @@ final class TextFileCodecTests: XCTestCase {
         }
     }
 
-    func testUnknownLegacyBytesFailClosed() {
-        XCTAssertThrowsError(try TextFileCodec.decode(Data([0x81, 0x8D, 0x8F]))) { error in
-            XCTAssertEqual(error as? TextFileCodecError, .invalidTextEncoding)
+    func testSingleLosslessWindowsCandidateIsDetected() throws {
+        let decoded = try TextFileCodec.decode(Data([0x81, 0x8D, 0x8F]))
+
+        XCTAssertEqual(decoded.encoding, .windows1251)
+        XCTAssertEqual(decoded.text, "ЃЌЏ")
+    }
+
+    func testOverlappingJapaneseAndWindowsCodepagesRequireSelection() throws {
+        let data = try XCTUnwrap("テスト".data(using: .shiftJIS))
+
+        XCTAssertThrowsError(try TextFileCodec.decode(data)) { error in
+            guard case let .ambiguousTextEncoding(encodings) = error as? TextFileCodecError else {
+                return XCTFail("Expected ambiguous encoding, got \(error)")
+            }
+            XCTAssertTrue(encodings.contains(.shiftJIS))
+            XCTAssertTrue(encodings.contains(.windows1251))
         }
+        XCTAssertEqual(try TextFileCodec.decode(data, assuming: .shiftJIS).text, "テスト")
     }
 
     func testUTF32BOMsFailClosedBeforeUTF16Detection() {
@@ -108,6 +122,111 @@ final class TextFileCodecTests: XCTestCase {
                 hasByteOrderMark: false
             )
             XCTAssertEqual(try TextFileCodec.encode(fresh), data)
+        }
+    }
+
+    func testWindowsCodepageRepresentativeStreamsRoundTripExactly() throws {
+        let fixtures: [(Data, TextFileEncoding, String)] = [
+            (
+                Data([0xBE, 0x9A, 0xE8, 0x9D, 0x9E, 0xFD, 0xE1, 0xED, 0xE9, 0xFA, 0xE4, 0xF4,
+                      0x20, 0xBC, 0x8A, 0xC8, 0x8D, 0x8E, 0xDD, 0xC1, 0xCD, 0xC9, 0xDA, 0xC4, 0xD4]),
+                .windows1250,
+                "ľščťžýáíéúäô ĽŠČŤŽÝÁÍÉÚÄÔ"
+            ),
+            (
+                Data(0xE1...0xFF),
+                .windows1251,
+                "бвгдежзийклмнопрстуфхцчшщъыьэюя"
+            ),
+            (
+                Data([0x80, 0x8A, 0x8C, 0x9A, 0x9C, 0x9F]),
+                .windows1252,
+                "€ŠŒšœŸ"
+            ),
+        ]
+
+        for (data, encoding, text) in fixtures {
+            let decoded = try TextFileCodec.decode(data, assuming: encoding)
+
+            XCTAssertEqual(decoded.encoding, encoding)
+            XCTAssertEqual(decoded.text, text)
+            XCTAssertEqual(try TextFileCodec.encode(decoded), data)
+            XCTAssertEqual(try TextFileCodec.encode(DecodedTextFile(
+                text: text,
+                encoding: encoding,
+                hasByteOrderMark: false
+            )), data)
+        }
+    }
+
+    func testWindowsCodepagesUseWinMergeExtendedMappings() throws {
+        XCTAssertEqual(
+            try TextFileCodec.decode(Data([0x80, 0x8A, 0x8C, 0x9A, 0x9C, 0x9F]), assuming: .windows1250).text,
+            "€ŠŚšśź"
+        )
+        XCTAssertEqual(
+            try TextFileCodec.decode(Data([0x80, 0x8A, 0x8C, 0x9A, 0x9C, 0x9F]), assuming: .windows1251).text,
+            "ЂЉЊљњџ"
+        )
+    }
+
+    func testWindowsCodepagesRejectUndefinedBytesAndUnrepresentableEdits() {
+        XCTAssertThrowsError(try TextFileCodec.decode(Data([0x81]), assuming: .windows1250))
+        XCTAssertThrowsError(try TextFileCodec.decode(Data([0x98]), assuming: .windows1251))
+        XCTAssertThrowsError(try TextFileCodec.decode(Data([0x81]), assuming: .windows1252))
+
+        for encoding in [TextFileEncoding.windows1250, .windows1251, .windows1252] {
+            XCTAssertThrowsError(try TextFileCodec.encode(DecodedTextFile(
+                text: "🙂",
+                encoding: encoding,
+                hasByteOrderMark: false
+            ))) { error in
+                XCTAssertEqual(error as? TextFileCodecError, .encodingFailed(encoding))
+            }
+        }
+    }
+
+    func testWindowsCodepagesRequireExplicitSelectionDuringAutomaticDetection() throws {
+        let data = Data([0x80, 0x8A, 0x8C, 0x9A, 0x9C, 0x9F])
+
+        XCTAssertThrowsError(try TextFileCodec.decode(data)) { error in
+            XCTAssertEqual(
+                error as? TextFileCodecError,
+                .ambiguousTextEncoding([.windows1250, .windows1251, .windows1252])
+            )
+        }
+        XCTAssertEqual(try TextFileCodec.decode(data, assuming: .windows1252).text, "€ŠŒšœŸ")
+    }
+
+    func testWindowsCodepageByteTablesRoundTripLosslessly() throws {
+        let undefined: [TextFileEncoding: Set<UInt8>] = [
+            .windows1250: [0x81, 0x83, 0x88, 0x90, 0x98],
+            .windows1251: [0x98],
+            .windows1252: [0x81, 0x8D, 0x8F, 0x90, 0x9D],
+        ]
+
+        for encoding in [TextFileEncoding.windows1250, .windows1251, .windows1252] {
+            for value in UInt8.min...UInt8.max {
+                let data = Data([value])
+                if undefined[encoding, default: []].contains(value) {
+                    XCTAssertThrowsError(
+                        try TextFileCodec.decode(data, assuming: encoding),
+                        "\(encoding.displayName) byte \(value)"
+                    )
+                    continue
+                }
+                let decoded = try TextFileCodec.decode(data, assuming: encoding)
+                let fresh = DecodedTextFile(
+                    text: decoded.text,
+                    encoding: encoding,
+                    hasByteOrderMark: false
+                )
+                XCTAssertEqual(
+                    try TextFileCodec.encode(fresh),
+                    data,
+                    "\(encoding.displayName) byte \(value)"
+                )
+            }
         }
     }
 
@@ -357,7 +476,7 @@ final class TextFileCodecTests: XCTestCase {
 
     func testLegacyEncodingRejectsUnrepresentableEdits() throws {
         let data = try XCTUnwrap("テスト".data(using: .shiftJIS))
-        let decoded = try TextFileCodec.decode(data)
+        let decoded = try TextFileCodec.decode(data, assuming: .shiftJIS)
         let edited = DecodedTextFile(
             text: decoded.text + "🙂",
             encoding: decoded.encoding,

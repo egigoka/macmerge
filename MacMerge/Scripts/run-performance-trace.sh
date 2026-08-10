@@ -15,13 +15,52 @@ time_limit=${TRACE_TIME_LIMIT:-20s}
 line_count=${LINE_COUNT:-1000000}
 density=${FIXTURE_DENSITY:-sparse}
 app="$package_root/dist/MacMerge.app"
+app_executable="$app/Contents/MacOS/MacMerge"
 trace_pid=""
 app_pid=""
+existing_pid=""
+toc=""
+cleanup_apps=0
+owned_app_pids=()
+watchdog_pid=""
+
+if [[ ! "$line_count" =~ ^[1-9][0-9]*$ ]]; then
+    echo "LINE_COUNT must be a positive decimal integer." >&2
+    exit 1
+fi
+if (( ${#line_count} > 7 )) || (( ${#line_count} == 7 && 10#$line_count > 1048576 )); then
+    echo "LINE_COUNT exceeds MacMerge's 1,048,576-line limit." >&2
+    exit 1
+fi
+line_count=$((10#$line_count))
+
+app_pids() {
+    local candidate command
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        command=$(ps -p "$candidate" -o command= 2>/dev/null || true)
+        if [[ "$command" == "$app_executable" || "$command" == "$app_executable "* ]]; then
+            echo "$candidate"
+        fi
+    done < <(pgrep -x MacMerge || true)
+}
 
 cleanup() {
-    if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
-        kill "$app_pid" 2>/dev/null || true
-        wait "$app_pid" 2>/dev/null || true
+    if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+    fi
+    if [[ $cleanup_apps == 1 ]]; then
+        for candidate in "${owned_app_pids[@]-}"; do kill "$candidate" 2>/dev/null || true; done
+        for _ in {1..50}; do
+            local alive=0
+            for candidate in "${owned_app_pids[@]-}"; do
+                if kill -0 "$candidate" 2>/dev/null; then alive=1; break; fi
+            done
+            if [[ $alive == 0 ]]; then break; fi
+            sleep 0.1
+        done
+        for candidate in "${owned_app_pids[@]-}"; do kill -KILL "$candidate" 2>/dev/null || true; done
     fi
     if [[ -n "$trace_pid" ]] && kill -0 "$trace_pid" 2>/dev/null; then
         kill -INT "$trace_pid" 2>/dev/null || true
@@ -58,19 +97,24 @@ swift run \
 
 left="$fixture_dir/macmerge-$line_count-left.txt"
 right="$fixture_dir/macmerge-$line_count-right.txt"
+existing_pid=$(app_pids)
+if [[ -n "$existing_pid" ]]; then
+    echo "Close the packaged MacMerge app before recording a trace." >&2
+    exit 1
+fi
+cleanup_apps=1
 xcrun xctrace record \
     --template "$template" \
     --time-limit "$time_limit" \
     --output "$trace" \
+    --env "MACMERGE_PERFORMANCE_REPORT=$report" \
+    --env "MACMERGE_PERFORMANCE_AUTOSCROLL=1" \
     --launch -- \
-    /usr/bin/env \
-    MACMERGE_PERFORMANCE_REPORT="$report" \
-    MACMERGE_PERFORMANCE_AUTOSCROLL=1 \
-    "$app/Contents/MacOS/MacMerge" &
+    "$app" &
 trace_pid=$!
 
 for _ in {1..100}; do
-    app_pid=$(pgrep -n -f "^$app/Contents/MacOS/MacMerge$") || true
+    app_pid=$(app_pids | tail -n 1) || true
     if [[ -n "$app_pid" ]]; then break; fi
     sleep 0.1
 done
@@ -79,15 +123,58 @@ if [[ -z "$app_pid" ]]; then
     echo "MacMerge did not launch under Instruments." >&2
     exit 1
 fi
+owned_app_pids=("$app_pid")
 open -a "$app" "$left" "$right"
-wait "$trace_pid"
+(
+    sleep 60
+    if kill -0 "$trace_pid" 2>/dev/null; then
+        kill -INT "$trace_pid" 2>/dev/null || true
+        sleep 5
+        kill -KILL "$trace_pid" 2>/dev/null || true
+    fi
+) &
+watchdog_pid=$!
+trace_status=0
+wait "$trace_pid" || trace_status=$?
+trace_pid=""
+kill "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
 
 if [[ ! -d "$trace" ]]; then
-    echo "Instruments did not create trace bundle: $trace" >&2
+    echo "Instruments did not create trace bundle (status $trace_status): $trace" >&2
+    exit 1
+fi
+toc=$(xcrun xctrace export --input "$trace" --toc)
+time_limit_reached=$(xmllint --xpath \
+    'boolean(/trace-toc/run/info/summary/end-reason[text()="Time limit reached"])' \
+    - <<<"$toc" 2>/dev/null || true)
+if (( trace_status != 0 )) && [[ "$time_limit_reached" != true ]]; then
+    echo "Instruments recording failed with status $trace_status." >&2
+    exit 1
+fi
+has_target=$(xmllint --xpath \
+    'boolean(/trace-toc/run/info/target/process[@type="launched" and @name="MacMerge"])' \
+    - <<<"$toc" 2>/dev/null || true)
+has_time_profile=$(xmllint --xpath \
+    'boolean(/trace-toc/run/data/table[@schema="time-profile"])' \
+    - <<<"$toc" 2>/dev/null || true)
+if [[ "$has_target" != true || "$has_time_profile" != true ]]; then
+    echo "Instruments trace does not contain a launched MacMerge Time Profiler run." >&2
     exit 1
 fi
 if [[ ! -s "$report" ]] || [[ $(plutil -extract complete raw "$report" 2>/dev/null || true) != 1 ]]; then
     echo "Traced app did not complete packaged performance workflow." >&2
+    exit 1
+fi
+for metric in load_ms comparison_ms first_render_ms scroll_ms resident_mib; do
+    value=$(plutil -extract "$metric" raw "$report" 2>/dev/null || true)
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || [[ "$metric" == resident_mib && "$value" == 0 ]]; then
+        echo "Traced performance report is missing $metric." >&2
+        exit 1
+    fi
+done
+if [[ $(plutil -extract rows raw "$report" 2>/dev/null || true) != $((line_count + 1)) ]]; then
+    echo "Traced performance report has unexpected row count." >&2
     exit 1
 fi
 

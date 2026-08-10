@@ -108,7 +108,7 @@ final class TextFileDocumentTests: XCTestCase {
     func testEditingNoncanonicalCP932FailsInsteadOfRewritingAliases() throws {
         let original = Data([0xFA, 0x5C])
         let url = try temporaryFile(data: original)
-        var document = try TextFileDocumentIO.load(from: url)
+        var document = try TextFileDocumentIO.load(from: url, assuming: .shiftJIS)
         document.text += "x"
 
         XCTAssertThrowsError(try TextFileDocumentIO.save(document)) { error in
@@ -120,7 +120,7 @@ final class TextFileDocumentTests: XCTestCase {
     func testLegacyFileSavePreservesDetectedCodepage() throws {
         let original = try XCTUnwrap("テスト\r\n".data(using: .shiftJIS))
         let url = try temporaryFile(data: original)
-        var document = try TextFileDocumentIO.load(from: url)
+        var document = try TextFileDocumentIO.load(from: url, assuming: .shiftJIS)
         XCTAssertEqual(document.encoding, .shiftJIS)
         document.text = "テスト追加\r\n"
 
@@ -128,6 +128,24 @@ final class TextFileDocumentTests: XCTestCase {
 
         let expected = try XCTUnwrap("テスト追加\r\n".data(using: .shiftJIS))
         XCTAssertEqual(try Data(contentsOf: url), expected)
+    }
+
+    func testExplicitWindowsCodepageSavePreservesEncoding() throws {
+        let original = Data([0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, 0x0D, 0x0A])
+        let url = try temporaryFile(data: original)
+        var document = try TextFileDocumentIO.load(from: url, assuming: .windows1251)
+        XCTAssertEqual(document.text, "Привет\r\n")
+        XCTAssertEqual(document.encoding, .windows1251)
+        document.text = "Привет!\r\n"
+
+        let result = try TextFileDocumentIO.save(document)
+
+        XCTAssertEqual(result.document.encoding, .windows1251)
+        XCTAssertFalse(result.document.isDirty)
+        XCTAssertEqual(
+            try Data(contentsOf: url),
+            Data([0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, 0x21, 0x0D, 0x0A])
+        )
     }
 
     func testCanonicallyEquivalentScalarEditIsDirty() throws {
@@ -145,7 +163,7 @@ final class TextFileDocumentTests: XCTestCase {
         let original = Data([0xFA, 0x5C])
         let source = try temporaryFile(data: original)
         let destination = source.deletingLastPathComponent().appending(path: "copy.txt")
-        let document = try TextFileDocumentIO.load(from: source)
+        let document = try TextFileDocumentIO.load(from: source, assuming: .shiftJIS)
 
         let saved = try TextFileDocumentIO.saveAs(document, to: destination)
 

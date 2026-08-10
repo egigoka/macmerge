@@ -1262,7 +1262,7 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: nestedComments).differences, 0)
         XCTAssertEqual(DiffSummary(rows: rawString).differences, 1)
         XCTAssertEqual(DiffSummary(rows: characterLiteral).differences, 0)
-        XCTAssertEqual(DiffSummary(rows: emptyRawString).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: emptyRawString).differences, 2)
         XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 0)
     }
 
@@ -1302,7 +1302,7 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
         XCTAssertEqual(DiffSummary(rows: tokenString).differences, 1)
         XCTAssertEqual(DiffSummary(rows: rawQuote).differences, 1)
-        XCTAssertEqual(DiffSummary(rows: persistentString).differences, 2)
+        XCTAssertEqual(DiffSummary(rows: persistentString).differences, 1)
         XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1)
         XCTAssertEqual(DiffSummary(rows: aliasedCookieByte).differences, 1)
     }
@@ -1410,7 +1410,7 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
         XCTAssertEqual(DiffSummary(rows: preprocessorComment).differences, 0)
         XCTAssertEqual(DiffSummary(rows: variableBlock).differences, 0)
-        XCTAssertEqual(DiffSummary(rows: concurrentVariables).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: concurrentVariables).differences, 2)
     }
 
     func testFSharpCommentsAndRawStringsMatchCrystalEdit() throws {
@@ -2029,7 +2029,7 @@ final class LineDiffTests: XCTestCase {
     }
 
     func testIgnoreBlankLinesMatrixPreservesRealEdits() throws {
-        let blankInsertions = ["\n", "\r", "\r\n", " \n", "\t\r\n"]
+        let blankInsertions = ["\n", "\r", "\r\n", " \n", "\t\r\n", "\u{0B}\n", "\u{0C}\r\n"]
         let whitespaceModes: [WhitespaceComparison] = [.compareAll, .ignoreChanges, .ignoreAll]
 
         for whitespace in whitespaceModes {

@@ -327,6 +327,7 @@ final class ComparisonModelTests: XCTestCase {
         model.enqueueOpen([leftURL, rightURL])
         await waitUntilIdle(model)
         model.selectFirstDifference()
+        model.activateSide(.right)
         let revealRevision = model.selectedDifferenceRevealRevision
         let selectionRevision = model.lineDifferenceSelectionRevision
 
