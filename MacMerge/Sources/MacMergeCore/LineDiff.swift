@@ -25,8 +25,10 @@ public enum WhitespaceComparison: String, Codable, Equatable, Sendable {
 public enum CommentSyntax: Equatable, Sendable {
     case cFamily
     case hashLine
+    case powerShell
     case python
     case sql
+    case html
     case markup
     case matlab
     case properties
@@ -63,9 +65,10 @@ public enum CommentSyntax: Equatable, Sendable {
         case "c", "cc", "cpp", "cppm", "ixx", "cxx", "h", "hm", "hpp", "hxx", "inl", "rh", "tlh",
              "tli", "xs", "cs", "java", "jav", "js", "json", "rul":
             self = .cFamily
-        case "pl", "pm", "plx", "po", "pot", "ps1", "psm1", "psd1", "rb", "rbw", "rake", "gemspec",
-             "sh", "conf", "tcl":
+        case "pl", "pm", "plx", "po", "pot", "rb", "rbw", "rake", "gemspec", "sh", "conf", "tcl":
             self = .hashLine
+        case "ps1", "psm1", "psd1":
+            self = .powerShell
         case "py":
             self = .python
         case "sql":
@@ -128,8 +131,9 @@ public enum CommentSyntax: Equatable, Sendable {
             self = .php
         case "tpl":
             self = .smarty
-        case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp", "md", "markdown", "mdown",
-             "mkd", "mkdn", "sgml", "xml":
+        case "html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp":
+            self = .html
+        case "md", "markdown", "mdown", "mkd", "mkdn", "sgml", "xml":
             self = .markup
         default:
             return nil
@@ -993,6 +997,7 @@ private enum DStringMode {
 }
 
 private enum EmbeddedHTMLLanguage {
+    case javascript
     case asp
     case php
     case smarty
@@ -1265,6 +1270,8 @@ private struct ComparisonTransform {
             return autoItCommentFilteredContents(in: document)
         case .fsharp:
             return fsharpCommentFilteredContents(in: document)
+        case .html:
+            return embeddedHTMLCommentFilteredContents(in: document, language: .javascript)
         case .asp:
             return embeddedHTMLCommentFilteredContents(in: document, language: .asp)
         case .php:
@@ -1295,32 +1302,45 @@ private struct ComparisonTransform {
         let lineDelimiters: [String]
         let blockDelimiter: (start: String, end: String)?
         let supportsTripleQuotedStrings: Bool
+        let carriesEscapedState: Bool
         switch commentSyntax {
         case .hashLine:
             lineDelimiters = ["#"]
             blockDelimiter = nil
             supportsTripleQuotedStrings = false
+            carriesEscapedState = true
+        case .powerShell:
+            lineDelimiters = ["#"]
+            blockDelimiter = nil
+            supportsTripleQuotedStrings = false
+            carriesEscapedState = false
         case .python:
             lineDelimiters = ["#"]
             blockDelimiter = nil
             supportsTripleQuotedStrings = true
+            carriesEscapedState = true
         case .sql:
             lineDelimiters = ["//", "--"]
             blockDelimiter = ("/*", "*/")
             supportsTripleQuotedStrings = false
+            carriesEscapedState = true
         case .markup:
             lineDelimiters = []
             blockDelimiter = ("<!--", "-->")
             supportsTripleQuotedStrings = false
+            carriesEscapedState = false
         case .cFamily, .matlab, .properties, .toml, .yaml, .basic, .css, .ini, .tex, .adaVhdl,
              .dcl, .rexx, .lispSiod, .fortran, .nsis, .resources, .verilog, .batch, .pascal,
-             .lua, .innoSetup, .dlang, .go, .rust, .abap, .autoIt, .fsharp, .asp, .php, .smarty:
+             .lua, .innoSetup, .dlang, .go, .rust, .abap, .autoIt, .fsharp, .html, .asp, .php,
+             .smarty:
             preconditionFailure("Dedicated comment scanner was not selected")
         }
         var contents: [String] = []
         var commentOnly: [Bool] = []
         var inBlockComment = false
+        var inLineComment = false
         var inMarkupElement = false
+        var inPowerShellVariable = false
         var quote: Character?
         var tripleQuote: String?
         contents.reserveCapacity(document.records.count)
@@ -1329,12 +1349,21 @@ private struct ComparisonTransform {
         for record in document.records {
             var output = ""
             var index = record.content.startIndex
-            var containedComment = inBlockComment
+            var containedComment = inBlockComment || inLineComment
+
+            if inLineComment {
+                index = record.content.endIndex
+            }
 
             while index < record.content.endIndex {
                 let character = record.content[index]
                 let nextIndex = record.content.index(after: index)
                 let remainder = record.content[index...]
+
+                if character == "\0" {
+                    if !inBlockComment { output.append(contentsOf: remainder) }
+                    break
+                }
 
                 if inBlockComment {
                     containedComment = true
@@ -1368,6 +1397,13 @@ private struct ComparisonTransform {
                     continue
                 }
 
+                if inPowerShellVariable {
+                    output.append(character)
+                    if !Self.legacyIsAlphanumeric(character) { inPowerShellVariable = false }
+                    index = nextIndex
+                    continue
+                }
+
                 if supportsTripleQuotedStrings,
                    let delimiter = ["\"\"\"", "'''"].first(where: remainder.hasPrefix) {
                     tripleQuote = delimiter
@@ -1384,14 +1420,25 @@ private struct ComparisonTransform {
                 }
                 if lineDelimiters.contains(where: remainder.hasPrefix) {
                     containedComment = true
+                    inLineComment = true
                     break
+                }
+                if commentSyntax == .powerShell, character == "$" {
+                    inPowerShellVariable = true
+                    output.append(character)
+                    index = nextIndex
+                    continue
                 }
                 if commentSyntax == .markup, character == "<" {
                     inMarkupElement = true
                 } else if commentSyntax == .markup, character == ">" {
                     inMarkupElement = false
                 }
-                if (commentSyntax != .markup || inMarkupElement), character == "\"" || character == "'" {
+                if (commentSyntax != .markup || inMarkupElement),
+                   character == "\"" || character == "'" && (
+                    index == record.content.startIndex ||
+                    !Self.legacyIsAlphanumeric(record.content[record.content.index(before: index)])
+                   ) {
                     quote = character
                 }
                 output.append(character)
@@ -1401,10 +1448,14 @@ private struct ComparisonTransform {
             if tripleQuote == nil {
                 if commentSyntax == .markup {
                     if quote != "\"" { quote = nil }
-                } else if record.content.last != "\\" {
+                } else if !carriesEscapedState || record.content.last != "\\" {
                     quote = nil
                 }
             }
+            if !carriesEscapedState || record.content.last != "\\" {
+                inLineComment = false
+            }
+            inPowerShellVariable = false
 
             contents.append(output)
             commentOnly.append(Self.isWholeCommentLine(containedComment, output: output, record: record))
@@ -2807,7 +2858,8 @@ private struct ComparisonTransform {
             var containedComment = commentKind != nil || scriptLineComment
             var modeBoundary: Range<Int>?
             var searchedModeBoundary = false
-            var scriptFirstToken = mode == .script && quote == nil && !scriptPreprocessor && !scriptCookieNoise
+            var scriptFirstToken = (mode == .script || mode == .embedded && language == .javascript) &&
+                quote == nil && !scriptPreprocessor && !scriptCookieNoise
             var embeddedLineComment = false
             var modeStartIndex = 0
             var scriptParserRan = false
@@ -2819,9 +2871,11 @@ private struct ComparisonTransform {
             var smartyBoundaryCursor = 0
             smartyHash = false
 
-            if mode == .script, scriptPreprocessor {
+            if (mode == .script || mode == .embedded && language == .javascript), scriptPreprocessor {
+                let preprocessorMode = mode
                 mode = .html
-                pendingScript = true
+                pendingScript = preprocessorMode == .script
+                pendingEmbedded = preprocessorMode == .embedded
                 inElement = true
                 if commentKind == .cBlock { commentKind = .html }
             }
@@ -2881,6 +2935,8 @@ private struct ComparisonTransform {
                         continue
                     }
                     let protected = switch language {
+                    case .javascript:
+                        false
                     case .asp:
                         false
                     case .php:
@@ -2919,11 +2975,6 @@ private struct ComparisonTransform {
 
                 let character = units[index]
                 if character == 0 {
-                    if mode == .style {
-                        if commentKind == nil { output.append(character) }
-                        index += 1
-                        continue
-                    }
                     if commentKind == nil && !scriptLineComment && !aspAliasComment {
                         output.append(contentsOf: units[index...])
                     }
@@ -2944,7 +2995,7 @@ private struct ComparisonTransform {
                     if Self.utf16HasPrefix(units, closer, at: index) {
                         commentKind = nil
                         index += closer.count
-                        if activeComment == .html {
+                        if activeComment == .html, !inElement {
                             if pendingScript {
                                 mode = .script
                             } else if pendingStyle {
@@ -2989,6 +3040,7 @@ private struct ComparisonTransform {
                         containedComment = true
                         commentKind = .html
                         inElement = false
+                        scriptPreprocessor = false
                         index += 4
                         if pendingScript {
                             mode = .script
@@ -2999,6 +3051,7 @@ private struct ComparisonTransform {
                         } else if pendingEmbedded {
                             mode = .embedded
                             if language == .php { commentKind = .cBlock }
+                            if language == .javascript { commentKind = .cBlock }
                             if language == .smarty { commentKind = .smarty }
                             if language == .asp {
                                 commentKind = nil
@@ -3083,6 +3136,7 @@ private struct ComparisonTransform {
                                 mode = .embedded
                                 if quote != nil {
                                     quoteContext = switch language {
+                                    case .javascript: .script
                                     case .asp: .asp
                                     case .php: .php
                                     case .smarty: .smarty
@@ -3095,7 +3149,8 @@ private struct ComparisonTransform {
                                 pendingStyle = false
                                 pendingEmbedded = false
                                 scriptCookieNoise = cookieNoise
-                                scriptFirstToken = mode == .script && quote == nil && !cookieNoise
+                                scriptFirstToken = (mode == .script || mode == .embedded && language == .javascript) &&
+                                    quote == nil && !cookieNoise
                                 scriptPreprocessor = false
                                 searchedModeBoundary = false
                                 modeStartIndex = index
@@ -3156,6 +3211,35 @@ private struct ComparisonTransform {
 
                 case .embedded:
                     switch language {
+                    case .javascript:
+                        scriptParserRan = true
+                        if index + 1 < units.count, character == 47, units[index + 1] == 47 {
+                            containedComment = true
+                            embeddedLineComment = true
+                            index = modeBoundary?.lowerBound ?? units.count
+                            continue
+                        }
+                        if index + 1 < units.count, character == 47, units[index + 1] == 42 {
+                            containedComment = true
+                            commentKind = .cBlock
+                            index += 2
+                            continue
+                        }
+                        if scriptPreprocessor {
+                            output.append(character)
+                            index += 1
+                            continue
+                        }
+                        if scriptFirstToken, character == 35 {
+                            scriptPreprocessor = true
+                        }
+                        if character == 34 || character == 39 &&
+                           (index == 0 || !Self.legacyIsAlphanumeric(units[index - 1])) {
+                            quote = character
+                            quoteContext = .script
+                        } else if !Self.legacyIsWhitespace(character) {
+                            scriptFirstToken = false
+                        }
                     case .asp:
                         if character == 39 {
                             containedComment = true
@@ -3223,7 +3307,7 @@ private struct ComparisonTransform {
 
             smartyHash = false
             scriptLineComment = false
-            if mode == .script {
+            if mode == .script || mode == .embedded && language == .javascript {
                 if scriptParserRan, units.last != 92 {
                     scriptPreprocessor = false
                     scriptCookieNoise = false

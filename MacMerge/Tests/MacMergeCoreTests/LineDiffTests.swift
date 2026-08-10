@@ -663,10 +663,15 @@ final class LineDiffTests: XCTestCase {
     func testCommentSyntaxUsesWinMergeExtensionFamilies() {
         XCTAssertEqual(CommentSyntax(fileExtension: "CPP"), .cFamily)
         XCTAssertEqual(CommentSyntax(fileExtension: "sh"), .hashLine)
+        for fileExtension in ["ps1", "psm1", "psd1"] {
+            XCTAssertEqual(CommentSyntax(fileExtension: fileExtension), .powerShell)
+        }
         XCTAssertEqual(CommentSyntax(fileExtension: "py"), .python)
         XCTAssertEqual(CommentSyntax(fileExtension: "sql"), .sql)
         XCTAssertEqual(CommentSyntax(fileExtension: "xml"), .markup)
-        XCTAssertEqual(CommentSyntax(fileExtension: "html"), .markup)
+        for fileExtension in ["html", "htm", "shtml", "ihtml", "ssi", "stm", "stml", "jsp"] {
+            XCTAssertEqual(CommentSyntax(fileExtension: fileExtension), .html)
+        }
         XCTAssertEqual(CommentSyntax(fileExtension: "m"), .matlab)
         XCTAssertEqual(CommentSyntax(fileExtension: "properties"), .properties)
         XCTAssertEqual(CommentSyntax(fileExtension: "toml"), .toml)
@@ -721,6 +726,75 @@ final class LineDiffTests: XCTestCase {
 
         XCTAssertEqual(DiffSummary(rows: comments).differences, 0)
         XCTAssertEqual(DiffSummary(rows: quoted).differences, 1)
+    }
+
+    func testLegacyLineCommentsCarryOnlyAfterTrailingBackslash() throws {
+        let fixtures: [(CommentSyntax, String)] = [
+            (.hashLine, "#"),
+            (.python, "#"),
+            (.sql, "--"),
+        ]
+        for (syntax, delimiter) in fixtures {
+            let continued = try LineDiff.compare(
+                left: "\(delimiter) old\\\nleft continuation\nend",
+                right: "\(delimiter) new\\\nright continuation\nend",
+                options: LineDiffOptions(ignoreComments: true, commentSyntax: syntax)
+            )
+            XCTAssertEqual(DiffSummary(rows: continued).differences, 0, "Syntax: \(syntax)")
+        }
+
+        let powerShell = try LineDiff.compare(
+            left: "# old\\\nleft continuation\nend",
+            right: "# new\\\nright continuation\nend",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .powerShell)
+        )
+        XCTAssertEqual(DiffSummary(rows: powerShell).differences, 1)
+    }
+
+    func testLegacyLineCommentParsersStopAtEmbeddedNul() throws {
+        let fixtures: [(CommentSyntax, String)] = [
+            (.hashLine, "#"),
+            (.python, "#"),
+            (.sql, "--"),
+            (.powerShell, "#"),
+        ]
+        for (syntax, delimiter) in fixtures {
+            let rows = try LineDiff.compare(
+                left: "value\0\(delimiter) left",
+                right: "value\0\(delimiter) right",
+                options: LineDiffOptions(ignoreComments: true, commentSyntax: syntax)
+            )
+            XCTAssertEqual(DiffSummary(rows: rows).differences, 1, "Syntax: \(syntax)")
+        }
+    }
+
+    func testPowerShellQuoteAndVariableCookiesMatchCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .powerShell)
+        let quoteAfterIdentifier = try LineDiff.compare(
+            left: "foo'# left",
+            right: "foo'# right",
+            options: options
+        )
+        let hashConsumedByVariable = try LineDiff.compare(
+            left: "$variable#left",
+            right: "$variable#right",
+            options: options
+        )
+        let underscoreEndsVariable = try LineDiff.compare(
+            left: "$variable_#left",
+            right: "$variable_#right",
+            options: options
+        )
+        let quoteAfterUnderscore = try LineDiff.compare(
+            left: "foo_'#left",
+            right: "foo_'#right",
+            options: options
+        )
+
+        XCTAssertEqual(DiffSummary(rows: quoteAfterIdentifier).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: hashConsumedByVariable).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: underscoreEndsVariable).differences, 1)
+        XCTAssertEqual(DiffSummary(rows: quoteAfterUnderscore).differences, 0)
     }
 
     func testPythonTripleQuotedHashesRemainSignificant() throws {
@@ -1778,7 +1852,7 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: script).differences, 0)
         XCTAssertEqual(DiffSummary(rows: style).differences, 0)
         XCTAssertEqual(DiffSummary(rows: uppercaseCloser).differences, 1)
-        XCTAssertEqual(DiffSummary(rows: styleAfterNul).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: styleAfterNul).differences, 1)
         XCTAssertEqual(DiffSummary(rows: htmlCommentClearsElement).differences, 0)
         XCTAssertEqual(DiffSummary(rows: dottedScriptTag).differences, 1)
         XCTAssertEqual(DiffSummary(rows: underscoredScriptTag).differences, 1)
@@ -1794,6 +1868,90 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(DiffSummary(rows: nestedUnquotedScript).differences, 0)
         XCTAssertEqual(DiffSummary(rows: scriptSpecialOpenerWins).differences, 1)
         XCTAssertEqual(DiffSummary(rows: commentPreservesFirstToken).differences, 0)
+    }
+
+    func testHTMLRoutesScriptAndStyleThroughEmbeddedParsers() throws {
+        let htmlOptions = LineDiffOptions(ignoreComments: true, commentSyntax: .html)
+        let script = try LineDiff.compare(
+            left: "<script>value(); // left\n</script>",
+            right: "<script>value(); // right\n</script>",
+            options: htmlOptions
+        )
+        let style = try LineDiff.compare(
+            left: "<style>value {/* left */ color:red}</style>",
+            right: "<style>value {/* right */ color:red}</style>",
+            options: htmlOptions
+        )
+        let markup = try LineDiff.compare(
+            left: "<script>value(); // left</script>",
+            right: "<script>value(); // right</script>",
+            options: LineDiffOptions(ignoreComments: true, commentSyntax: .markup)
+        )
+
+        XCTAssertEqual(DiffSummary(rows: script).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: style).differences, 0)
+        XCTAssertEqual(DiffSummary(rows: markup).differences, 1)
+    }
+
+    func testHTMLDefaultEmbeddedJavaScriptMatchesCrystalEdit() throws {
+        let options = LineDiffOptions(ignoreComments: true, commentSyntax: .html)
+        for opener in ["<?", "<%"] {
+            let comments = try LineDiff.compare(
+                left: "\(opener) value // left ?>",
+                right: "\(opener) value // right ?>",
+                options: options
+            )
+            let sameRecordHash = try LineDiff.compare(
+                left: "\(opener) # value // left ?>",
+                right: "\(opener) # value // right ?>",
+                options: options
+            )
+            let nextRecordPreprocessor = try LineDiff.compare(
+                left: "\(opener)\n# \" // left ?>",
+                right: "\(opener)\n# \" // right ?>",
+                options: options
+            )
+            let quotePreservesFirstToken = try LineDiff.compare(
+                left: "\(opener)\n\"value\"# \" // left ?>",
+                right: "\(opener)\n\"value\"# \" // right ?>",
+                options: options
+            )
+            let embeddedNul = try LineDiff.compare(
+                left: "\(opener) value\0// left ?>",
+                right: "\(opener) value\0// right ?>",
+                options: options
+            )
+            let carriedPreprocessorAlias = try LineDiff.compare(
+                left: "\(opener)\n#\\\n>#\"//left?>",
+                right: "\(opener)\n#\\\n>#\"//right?>",
+                options: options
+            )
+            let pendingEmbeddedComment = try LineDiff.compare(
+                left: "<tag \(opener)<!-- hidden --> left ?>",
+                right: "<tag \(opener)<!-- hidden --> right ?>",
+                options: options
+            )
+            let carriedBlockCommentAlias = try LineDiff.compare(
+                left: "\(opener)\n#/*\\\n-->//left",
+                right: "\(opener)\n#/*\\\n-->//right",
+                options: options
+            )
+            let htmlCommentClearsPreprocessorAlias = try LineDiff.compare(
+                left: "\(opener)\n#\\\n<!--*/\"//left\"",
+                right: "\(opener)\n#\\\n<!--*/\"//right\"",
+                options: options
+            )
+
+            XCTAssertEqual(DiffSummary(rows: comments).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: sameRecordHash).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: nextRecordPreprocessor).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: quotePreservesFirstToken).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: embeddedNul).differences, 1, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: carriedPreprocessorAlias).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: pendingEmbeddedComment).differences, 0, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: carriedBlockCommentAlias).differences, 1, "Opener: \(opener)")
+            XCTAssertEqual(DiffSummary(rows: htmlCommentClearsPreprocessorAlias).differences, 1, "Opener: \(opener)")
+        }
     }
 
     func testIgnoreCommentsHasNoEffectWithoutSupportedSyntax() throws {

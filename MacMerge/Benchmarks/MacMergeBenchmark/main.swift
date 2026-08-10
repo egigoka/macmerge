@@ -486,6 +486,7 @@ private func validateComparisonSemantics() throws {
         ("value = 1 # left", "value = 1 # right", .hashLine, "hash-line comments"),
         ("SELECT 1; -- left", "SELECT 1; -- right", .sql, "SQL comments"),
         ("<root><!-- left --></root>", "<root><!-- right --></root>", .markup, "markup comments"),
+        ("<script>value // left</script>", "<script>value // right</script>", .html, "HTML script comments"),
         ("value = 1; % left", "value = 1; % right", .matlab, "MATLAB comments"),
         ("# left", "# right", .properties, "Properties comments"),
         ("value = 1 # left", "value = 1 # right", .toml, "TOML comments"),
@@ -574,8 +575,20 @@ private func validateComparisonSemantics() throws {
         right: "// new\\\nright continuation\nend",
         options: LineDiffOptions(ignoreComments: true, commentSyntax: .verilog)
     )
+    let hashContinuation = try LineDiff.compare(
+        left: "# old\\\nleft continuation\nend",
+        right: "# new\\\nright continuation\nend",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .hashLine)
+    )
+    let powerShellContinuation = try LineDiff.compare(
+        left: "# old\\\nleft continuation\nend",
+        right: "# new\\\nright continuation\nend",
+        options: LineDiffOptions(ignoreComments: true, commentSyntax: .powerShell)
+    )
     guard DiffSummary(rows: rexxContinuation).differences == 0,
-          DiffSummary(rows: verilogContinuation).differences == 1 else {
+          DiffSummary(rows: verilogContinuation).differences == 1,
+          DiffSummary(rows: hashContinuation).differences == 0,
+          DiffSummary(rows: powerShellContinuation).differences == 1 else {
         throw BenchmarkError.semanticCheckFailed("comment continuation")
     }
     let preprocessorOverlap = try LineDiff.compare(
@@ -725,7 +738,7 @@ private func validateComparisonSemantics() throws {
           DiffSummary(rows: phpLineCommentBoundary).differences == 1,
           DiffSummary(rows: smartyHashState).differences == 0,
           DiffSummary(rows: scriptPreprocessor).differences == 0,
-          DiffSummary(rows: styleAfterNul).differences == 0 else {
+          DiffSummary(rows: styleAfterNul).differences == 1 else {
         throw BenchmarkError.semanticCheckFailed("embedded language boundaries")
     }
     let markupProse = try LineDiff.compare(
