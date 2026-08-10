@@ -295,6 +295,89 @@ public struct DiffLine: Equatable, Sendable {
     }
 }
 
+fileprivate final class DiffRowTextSource: @unchecked Sendable {
+    private let bytes: [UInt8]
+    private let ranges: [UInt64]
+
+    init(text: String) {
+        bytes = Array(text.utf8)
+        var ranges: [UInt64] = []
+        var start = 0
+        var index = 0
+        while index < bytes.count {
+            let byte = bytes[index]
+            guard byte == 0x0A || byte == 0x0D else {
+                index += 1
+                continue
+            }
+            ranges.append(Self.pack(start: start, end: index))
+            if byte == 0x0D, index + 1 < bytes.count, bytes[index + 1] == 0x0A {
+                index += 2
+            } else {
+                index += 1
+            }
+            start = index
+        }
+        if start < bytes.count {
+            ranges.append(Self.pack(start: start, end: bytes.count))
+        }
+        self.ranges = ranges
+    }
+
+    var count: Int { ranges.count }
+
+    func content(at index: Int) -> String {
+        let range = unpackedRange(at: index)
+        return String(decoding: bytes[range], as: UTF8.self)
+    }
+
+    private func unpackedRange(at index: Int) -> Range<Int> {
+        let packed = ranges[index]
+        return Int(UInt32(truncatingIfNeeded: packed)) ..< Int(UInt32(truncatingIfNeeded: packed >> 32))
+    }
+
+    private static func pack(start: Int, end: Int) -> UInt64 {
+        guard let start = UInt32(exactly: start), let end = UInt32(exactly: end) else {
+            preconditionFailure("Diff row source exceeds comparison limits")
+        }
+        return UInt64(start) | (UInt64(end) << 32)
+    }
+}
+
+fileprivate enum DiffRowText: Sendable {
+    case missing
+    case owned(String)
+    case source(DiffRowTextSource)
+}
+
+fileprivate final class DiffRowTextStorage: @unchecked Sendable {
+    let left: DiffRowText
+    let right: DiffRowText
+
+    init(left: DiffRowText, right: DiffRowText) {
+        self.left = left
+        self.right = right
+    }
+
+    var isSourceBacked: Bool {
+        if case .source = left { return true }
+        if case .source = right { return true }
+        return false
+    }
+
+    func text(from source: DiffRowText, lineNumber: Int) -> String? {
+        guard lineNumber != 0 else { return nil }
+        return switch source {
+        case .missing:
+            nil
+        case let .owned(text):
+            text
+        case let .source(source):
+            source.content(at: lineNumber - 1)
+        }
+    }
+}
+
 public struct DiffRow: Identifiable, Equatable, Sendable {
     private static let lineNumberBits = 30
     private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
@@ -311,8 +394,7 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    private let leftText: String?
-    private let rightText: String?
+    private let storage: DiffRowTextStorage
     private let metadata: UInt64
 
     private var storedLeftNumber: Int { Int(metadata & Self.lineNumberMask) }
@@ -330,22 +412,38 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
     }
 
     var sharesTextStorage: Bool { metadata & Self.sharesTextBit != 0 }
+    var usesSourceTextStorage: Bool { storage.isSourceBacked }
 
     public var left: DiffLine? {
-        Self.line(text: leftText, storedNumber: storedLeftNumber)
+        Self.line(
+            text: storage.text(from: storage.left, lineNumber: storedLeftNumber),
+            storedNumber: storedLeftNumber
+        )
     }
 
     public var right: DiffLine? {
         Self.line(
-            text: metadata & Self.sharesTextBit == 0 ? rightText : leftText,
+            text: metadata & Self.sharesTextBit == 0
+                ? storage.text(from: storage.right, lineNumber: storedRightNumber)
+                : storage.text(from: storage.left, lineNumber: storedLeftNumber),
             storedNumber: storedRightNumber
         )
     }
 
     public var id: ID {
         ID(
-            leftNumber: left?.number,
-            rightNumber: right?.number
+            leftNumber: Self.lineNumber(
+                text: storedLeftNumber == Self.encodedLineNumber
+                    ? storage.text(from: storage.left, lineNumber: storedLeftNumber)
+                    : nil,
+                storedNumber: storedLeftNumber
+            ),
+            rightNumber: Self.lineNumber(
+                text: storedRightNumber == Self.encodedLineNumber
+                    ? storage.text(from: storage.right, lineNumber: storedRightNumber)
+                    : nil,
+                storedNumber: storedRightNumber
+            )
         )
     }
 
@@ -356,33 +454,81 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
     public init(left: DiffLine?, right: DiffLine?, kind: DiffKind) {
         let storedLeft = Self.store(left)
         let storedRight = Self.store(right)
-        let sharesText = if let leftText = storedLeft.text, let rightText = storedRight.text {
+        let sharesText = if case let .owned(leftText) = storedLeft.text,
+                            case let .owned(rightText) = storedRight.text {
             storedLeft.number != Self.encodedLineNumber &&
                 storedRight.number != Self.encodedLineNumber &&
                 leftText.utf8.elementsEqual(rightText.utf8)
         } else {
             false
         }
-        leftText = storedLeft.text
-        rightText = sharesText ? nil : storedRight.text
+        storage = DiffRowTextStorage(
+            left: storedLeft.text,
+            right: sharesText ? .missing : storedRight.text
+        )
+        metadata = Self.metadata(
+            leftNumber: storedLeft.number,
+            rightNumber: storedRight.number,
+            kind: kind,
+            sharesText: sharesText
+        )
+    }
+
+    fileprivate init(
+        leftNumber: Int?,
+        rightNumber: Int?,
+        storage: DiffRowTextStorage,
+        kind: DiffKind,
+        sharesText: Bool
+    ) {
+        self.storage = storage
+        metadata = Self.metadata(
+            leftNumber: leftNumber ?? 0,
+            rightNumber: rightNumber ?? 0,
+            kind: kind,
+            sharesText: sharesText
+        )
+    }
+
+    fileprivate static func sourceBacked(
+        leftNumber: Int?,
+        rightNumber: Int?,
+        storage: DiffRowTextStorage,
+        kind: DiffKind
+    ) -> DiffRow {
+        DiffRow(
+            leftNumber: leftNumber,
+            rightNumber: rightNumber,
+            storage: storage,
+            kind: kind,
+            sharesText: false
+        )
+    }
+
+    private static func metadata(
+        leftNumber: Int,
+        rightNumber: Int,
+        kind: DiffKind,
+        sharesText: Bool
+    ) -> UInt64 {
         let kindValue: UInt64 = switch kind {
         case .unchanged: 0
         case .modified: 1
         case .removed: 2
         case .added: 3
         }
-        metadata = UInt64(storedLeft.number) |
-            (UInt64(storedRight.number) << Self.lineNumberBits) |
+        return UInt64(leftNumber) |
+            (UInt64(rightNumber) << Self.lineNumberBits) |
             (kindValue << (Self.lineNumberBits * 2)) |
             (sharesText ? Self.sharesTextBit : 0)
     }
 
-    private static func store(_ line: DiffLine?) -> (text: String?, number: Int) {
-        guard let line else { return (nil, 0) }
+    private static func store(_ line: DiffLine?) -> (text: DiffRowText, number: Int) {
+        guard let line else { return (.missing, 0) }
         if (1..<encodedLineNumber).contains(line.number) {
-            return (line.text, line.number)
+            return (.owned(line.text), line.number)
         }
-        return ("\(line.number)\0\(line.text)", encodedLineNumber)
+        return (.owned("\(line.number)\0\(line.text)"), encodedLineNumber)
     }
 
     private static func line(text: String?, storedNumber: Int) -> DiffLine? {
@@ -395,6 +541,17 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
             preconditionFailure("Invalid encoded line number")
         }
         return DiffLine(number: number, text: String(text[text.index(after: separator)...]))
+    }
+
+    private static func lineNumber(text: String?, storedNumber: Int) -> Int? {
+        guard storedNumber != 0 else { return nil }
+        guard storedNumber == encodedLineNumber else { return storedNumber }
+        guard let text,
+              let separator = text.firstIndex(of: "\0"),
+              let number = Int(text[..<separator]) else {
+            preconditionFailure("Invalid encoded line number")
+        }
+        return number
     }
 }
 
@@ -444,6 +601,10 @@ public enum LineDiff {
         try validateInput(rightText)
         let leftDocument = TextDocument(text: leftText)
         let rightDocument = TextDocument(text: rightText)
+        let rowStorage = DiffRowTextStorage(
+            left: .source(DiffRowTextSource(text: leftText)),
+            right: .source(DiffRowTextSource(text: rightText))
+        )
         let transform = try ComparisonTransform(options: options)
         let commentFiltered = transform.commentFilteredPair(left: leftDocument, right: rightDocument)
         let hunks = try nativeHunks(
@@ -468,8 +629,9 @@ public enum LineDiff {
 
             while leftIndex < hunk.leftStart {
                 rows.append(row(
-                    left: line(at: leftIndex, in: leftDocument),
-                    right: line(at: rightIndex, in: rightDocument),
+                    leftIndex: leftIndex,
+                    rightIndex: rightIndex,
+                    storage: rowStorage,
                     kind: .unchanged
                 ))
                 leftIndex += 1
@@ -482,6 +644,7 @@ public enum LineDiff {
                     hunk: hunk,
                     leftDocument: leftDocument,
                     rightDocument: rightDocument,
+                    rowStorage: rowStorage,
                     transform: transform,
                     commentFiltered: commentFiltered,
                     options: options,
@@ -494,6 +657,7 @@ public enum LineDiff {
                     hunk: hunk,
                     left: leftDocument,
                     right: rightDocument,
+                    rowStorage: rowStorage,
                     leftFiltered: nil,
                     rightFiltered: nil,
                     leftIndex: &leftIndex,
@@ -507,8 +671,9 @@ public enum LineDiff {
         }
         while leftIndex < leftDocument.records.count {
             rows.append(row(
-                left: line(at: leftIndex, in: leftDocument),
-                right: line(at: rightIndex, in: rightDocument),
+                leftIndex: leftIndex,
+                rightIndex: rightIndex,
+                storage: rowStorage,
                 kind: .unchanged
             ))
             leftIndex += 1
@@ -516,14 +681,6 @@ public enum LineDiff {
         }
 
         return rows
-    }
-
-    private static func line(
-        at index: Int,
-        in document: TextDocument,
-        numberOffset: Int = 0
-    ) -> DiffLine {
-        DiffLine(number: numberOffset + index + 1, text: document.records[index].content)
     }
 
     private static func validateInput(_ text: String) throws {
@@ -549,10 +706,18 @@ public enum LineDiff {
         }
     }
 
-    private static func row(left: DiffLine?, right: DiffLine?, kind: DiffKind) -> DiffRow {
-        DiffRow(
-            left: left,
-            right: right,
+    private static func row(
+        leftIndex: Int?,
+        rightIndex: Int?,
+        storage: DiffRowTextStorage,
+        kind: DiffKind,
+        leftNumberOffset: Int = 0,
+        rightNumberOffset: Int = 0
+    ) -> DiffRow {
+        DiffRow.sourceBacked(
+            leftNumber: leftIndex.map { leftNumberOffset + $0 + 1 },
+            rightNumber: rightIndex.map { rightNumberOffset + $0 + 1 },
+            storage: storage,
             kind: kind
         )
     }
@@ -562,6 +727,7 @@ public enum LineDiff {
         hunk: NativeHunk,
         left: TextDocument,
         right: TextDocument,
+        rowStorage: DiffRowTextStorage,
         leftFiltered: [Bool]?,
         rightFiltered: [Bool]?,
         leftIndex: inout Int,
@@ -579,45 +745,61 @@ public enum LineDiff {
             let rightIsFiltered = hasRight && rightFiltered?[rightIndex] == true
 
             if hunk.isTrivial || (leftIsFiltered && rightIsFiltered) {
-                let leftLine = hasLeft ? line(at: leftIndex, in: left, numberOffset: leftNumberOffset) : nil
-                let rightLine = hasRight ? line(at: rightIndex, in: right, numberOffset: rightNumberOffset) : nil
-                rows.append(row(left: leftLine, right: rightLine, kind: .unchanged))
+                rows.append(row(
+                    leftIndex: hasLeft ? leftIndex : nil,
+                    rightIndex: hasRight ? rightIndex : nil,
+                    storage: rowStorage,
+                    kind: .unchanged,
+                    leftNumberOffset: leftNumberOffset,
+                    rightNumberOffset: rightNumberOffset
+                ))
                 if hasLeft { leftIndex += 1 }
                 if hasRight { rightIndex += 1 }
             } else if leftIsFiltered && leftEnd - leftIndex > rightEnd - rightIndex {
                 rows.append(row(
-                    left: line(at: leftIndex, in: left, numberOffset: leftNumberOffset),
-                    right: nil,
-                    kind: .unchanged
+                    leftIndex: leftIndex,
+                    rightIndex: nil,
+                    storage: rowStorage,
+                    kind: .unchanged,
+                    leftNumberOffset: leftNumberOffset
                 ))
                 leftIndex += 1
             } else if rightIsFiltered && rightEnd - rightIndex > leftEnd - leftIndex {
                 rows.append(row(
-                    left: nil,
-                    right: line(at: rightIndex, in: right, numberOffset: rightNumberOffset),
-                    kind: .unchanged
+                    leftIndex: nil,
+                    rightIndex: rightIndex,
+                    storage: rowStorage,
+                    kind: .unchanged,
+                    rightNumberOffset: rightNumberOffset
                 ))
                 rightIndex += 1
             } else if hasLeft && hasRight {
                 rows.append(row(
-                    left: line(at: leftIndex, in: left, numberOffset: leftNumberOffset),
-                    right: line(at: rightIndex, in: right, numberOffset: rightNumberOffset),
-                    kind: .modified
+                    leftIndex: leftIndex,
+                    rightIndex: rightIndex,
+                    storage: rowStorage,
+                    kind: .modified,
+                    leftNumberOffset: leftNumberOffset,
+                    rightNumberOffset: rightNumberOffset
                 ))
                 leftIndex += 1
                 rightIndex += 1
             } else if hasLeft {
                 rows.append(row(
-                    left: line(at: leftIndex, in: left, numberOffset: leftNumberOffset),
-                    right: nil,
-                    kind: .removed
+                    leftIndex: leftIndex,
+                    rightIndex: nil,
+                    storage: rowStorage,
+                    kind: .removed,
+                    leftNumberOffset: leftNumberOffset
                 ))
                 leftIndex += 1
             } else {
                 rows.append(row(
-                    left: nil,
-                    right: line(at: rightIndex, in: right, numberOffset: rightNumberOffset),
-                    kind: .added
+                    leftIndex: nil,
+                    rightIndex: rightIndex,
+                    storage: rowStorage,
+                    kind: .added,
+                    rightNumberOffset: rightNumberOffset
                 ))
                 rightIndex += 1
             }
@@ -629,6 +811,7 @@ public enum LineDiff {
         hunk: NativeHunk,
         leftDocument: TextDocument,
         rightDocument: TextDocument,
+        rowStorage: DiffRowTextStorage,
         transform: ComparisonTransform,
         commentFiltered: ComparisonTransform.CommentFilteredPair?,
         options: LineDiffOptions,
@@ -664,9 +847,12 @@ public enum LineDiff {
             }
             while localLeftIndex < secondary.leftStart {
                 rows.append(row(
-                    left: line(at: localLeftIndex, in: leftSlice, numberOffset: hunk.leftStart),
-                    right: line(at: localRightIndex, in: rightSlice, numberOffset: hunk.rightStart),
-                    kind: .unchanged
+                    leftIndex: localLeftIndex,
+                    rightIndex: localRightIndex,
+                    storage: rowStorage,
+                    kind: .unchanged,
+                    leftNumberOffset: hunk.leftStart,
+                    rightNumberOffset: hunk.rightStart
                 ))
                 localLeftIndex += 1
                 localRightIndex += 1
@@ -676,6 +862,7 @@ public enum LineDiff {
                 hunk: secondary,
                 left: leftSlice,
                 right: rightSlice,
+                rowStorage: rowStorage,
                 leftFiltered: prepared.left.filteredLines,
                 rightFiltered: prepared.right.filteredLines,
                 leftIndex: &localLeftIndex,
@@ -690,9 +877,12 @@ public enum LineDiff {
         }
         while localLeftIndex < leftSlice.records.count {
             rows.append(row(
-                left: line(at: localLeftIndex, in: leftSlice, numberOffset: hunk.leftStart),
-                right: line(at: localRightIndex, in: rightSlice, numberOffset: hunk.rightStart),
-                kind: .unchanged
+                leftIndex: localLeftIndex,
+                rightIndex: localRightIndex,
+                storage: rowStorage,
+                kind: .unchanged,
+                leftNumberOffset: hunk.leftStart,
+                rightNumberOffset: hunk.rightStart
             ))
             localLeftIndex += 1
             localRightIndex += 1

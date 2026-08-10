@@ -4,7 +4,7 @@ import XCTest
 
 final class LineDiffTests: XCTestCase {
     func testDiffRowStorageRemainsCompact() {
-        XCTAssertLessThanOrEqual(MemoryLayout<DiffRow>.stride, 40)
+        XCTAssertLessThanOrEqual(MemoryLayout<DiffRow>.stride, 16)
 
         let maximumLine = Int(MMX_MAX_LINE_COUNT)
         let row = DiffRow(
@@ -24,6 +24,19 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(unusual.left, DiffLine(number: -1, text: "left\0text"))
         XCTAssertEqual(unusual.right, DiffLine(number: Int.max, text: "right"))
         XCTAssertEqual(unusual.kind, .added)
+    }
+
+    func testComparedRowsUseSourceBackedTextStorage() throws {
+        let left = "alpha\r\né\nleft only"
+        let right = "alpha\ne\u{301}\nright only"
+
+        let rows = try LineDiff.compare(left: left, right: right)
+
+        XCTAssertTrue(rows.allSatisfy(\.usesSourceTextStorage))
+        XCTAssertEqual(rows.map(\.left?.text), ["alpha", "é", "left only"])
+        XCTAssertEqual(rows.map(\.right?.text), ["alpha", "e\u{301}", "right only"])
+        XCTAssertEqual(Array(rows[1].left?.text.utf8 ?? "".utf8), Array("é".utf8))
+        XCTAssertEqual(Array(rows[1].right?.text.utf8 ?? "".utf8), Array("e\u{301}".utf8))
     }
 
     func testUnchangedLinesRemainAligned() throws {

@@ -29,14 +29,14 @@ Acceptance: user can open two files, apply individual changes in either directio
 
 - [x] Define stable C boundary for reusable comparison code.
 - [x] Reuse WinMerge's bundled xdiff engine instead of growing starter Swift line engine.
-- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 203-test Swift package baseline complete; broader Windows fixture parity pending).
+- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 204-test Swift package baseline complete; broader Windows fixture parity pending).
 - [-] Add encoding detection and lossless round trips (UTF-8/UTF-16 and verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 paths complete; ambiguity selection complete; broader Windows mapping parity pending).
 - [x] Preserve mixed line endings and final-newline state.
 - [x] Add whitespace, case, blank-line, line-filter, and substitution options.
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
 - [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
-- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, exact-equal aligned text sharing, single-word difference-location hashing, allocation-free editable sentinel, direct document-record comparison, and UInt32 ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use 246 MiB; distinct row text remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived IDs, 16-byte packed rows, source-range-backed lazy text, single-word difference locations, allocation-free editable sentinel, direct document-record comparison, and UInt32 ordered difference indices complete; shallow row storage is 15.3 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use 245 MiB; aligned row metadata remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -87,7 +87,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [x] Dialog and property-page inventory: every `IDD_*` resource in `Src/Merge.rc` and `Src/resource.h`.
 - [x] Actual action and validation semantics: MFC message maps plus `ON_COMMAND` and `ON_UPDATE_COMMAND_UI` handlers.
 - [x] Windows rendered and interaction evidence: `Testing/GoogleTest/GUITests` and manual documentation.
-- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 203 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
+- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 204 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
 
 ### Required state matrix
 
@@ -503,8 +503,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 ## Current Work Order
 
 1. Finish Location Pane parity: two-pane map, significant-difference blocks, selected marker, viewport shading, click/drag navigation, adjustable accessibility, model tests, packaged AX/screenshot smoke, and performance checks are complete; moved connectors, context commands, visibility, persistence, and automated UI interaction remain.
-2. Replace distinct materialized row text with source-range-backed access; exact-equal text sharing, packed rows, single-word difference locations, UInt32 ordered indices, and dense/4 KiB/tab-heavy/wide-Unicode benchmarks are complete.
-3. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
-4. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
-5. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
-6. Expand into directory comparison after text-core behavior is fixture-compatible.
+2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
+3. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
+4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
+5. Expand into directory comparison after text-core behavior is fixture-compatible.
