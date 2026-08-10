@@ -1,5 +1,5 @@
 import CXDiff
-import MacMergeCore
+@testable import MacMergeCore
 import XCTest
 
 final class LineDiffTests: XCTestCase {
@@ -32,6 +32,52 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(rows.map(\.kind), [.unchanged, .unchanged])
         XCTAssertEqual(rows.map(\.left?.number), [1, 2])
         XCTAssertEqual(rows.map(\.right?.number), [1, 2])
+        XCTAssertEqual(rows.map(\.left?.text), ["alpha", "beta"])
+        XCTAssertEqual(rows.map(\.right?.text), ["alpha", "beta"])
+    }
+
+    func testEqualRowTextSharesBackingStorage() {
+        let text = String(repeating: "x", count: 4_096)
+        let row = DiffRow(
+            left: DiffLine(number: 1, text: text),
+            right: DiffLine(number: 2, text: String(text)),
+            kind: .unchanged
+        )
+
+        XCTAssertTrue(row.sharesTextStorage)
+        XCTAssertEqual(row.left?.text, text)
+        XCTAssertEqual(row.right?.text, text)
+
+        let canonicallyEquivalent = DiffRow(
+            left: DiffLine(number: 1, text: "é"),
+            right: DiffLine(number: 2, text: "e\u{301}"),
+            kind: .modified
+        )
+        XCTAssertFalse(canonicallyEquivalent.sharesTextStorage)
+        XCTAssertEqual(Array(canonicallyEquivalent.left?.text.utf8 ?? "".utf8), Array("é".utf8))
+        XCTAssertEqual(Array(canonicallyEquivalent.right?.text.utf8 ?? "".utf8), Array("e\u{301}".utf8))
+
+        let leftOnlyEmpty = DiffRow(
+            left: DiffLine(number: 1, text: ""),
+            right: nil,
+            kind: .removed
+        )
+        XCTAssertFalse(leftOnlyEmpty.sharesTextStorage)
+        XCTAssertNil(leftOnlyEmpty.right)
+
+        let sharedEquivalent = DiffRow(
+            left: DiffLine(number: 1, text: "é"),
+            right: DiffLine(number: 2, text: "é"),
+            kind: .unchanged
+        )
+        let nonsharedEquivalent = DiffRow(
+            left: DiffLine(number: 1, text: "é"),
+            right: DiffLine(number: 2, text: "e\u{301}"),
+            kind: .unchanged
+        )
+        XCTAssertTrue(sharedEquivalent.sharesTextStorage)
+        XCTAssertFalse(nonsharedEquivalent.sharesTextStorage)
+        XCTAssertEqual(nonsharedEquivalent, sharedEquivalent)
     }
 
     func testReplacementProducesModifiedRow() throws {

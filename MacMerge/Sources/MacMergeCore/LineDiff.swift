@@ -296,9 +296,10 @@ public struct DiffLine: Equatable, Sendable {
 }
 
 public struct DiffRow: Identifiable, Equatable, Sendable {
-    private static let lineNumberBits = 31
+    private static let lineNumberBits = 30
     private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
     private static let encodedLineNumber = Int(lineNumberMask)
+    private static let sharesTextBit = UInt64(1) << 62
 
     public struct ID: Hashable, Sendable {
         public let leftNumber: Int?
@@ -320,7 +321,7 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
     }
 
     public var kind: DiffKind {
-        switch metadata >> (Self.lineNumberBits * 2) {
+        switch (metadata >> (Self.lineNumberBits * 2)) & 0b11 {
         case 0: .unchanged
         case 1: .modified
         case 2: .removed
@@ -328,12 +329,17 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
     }
 
+    var sharesTextStorage: Bool { metadata & Self.sharesTextBit != 0 }
+
     public var left: DiffLine? {
         Self.line(text: leftText, storedNumber: storedLeftNumber)
     }
 
     public var right: DiffLine? {
-        Self.line(text: rightText, storedNumber: storedRightNumber)
+        Self.line(
+            text: metadata & Self.sharesTextBit == 0 ? rightText : leftText,
+            storedNumber: storedRightNumber
+        )
     }
 
     public var id: ID {
@@ -343,11 +349,22 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         )
     }
 
+    public static func == (lhs: DiffRow, rhs: DiffRow) -> Bool {
+        lhs.left == rhs.left && lhs.right == rhs.right && lhs.kind == rhs.kind
+    }
+
     public init(left: DiffLine?, right: DiffLine?, kind: DiffKind) {
         let storedLeft = Self.store(left)
         let storedRight = Self.store(right)
+        let sharesText = if let leftText = storedLeft.text, let rightText = storedRight.text {
+            storedLeft.number != Self.encodedLineNumber &&
+                storedRight.number != Self.encodedLineNumber &&
+                leftText.utf8.elementsEqual(rightText.utf8)
+        } else {
+            false
+        }
         leftText = storedLeft.text
-        rightText = storedRight.text
+        rightText = sharesText ? nil : storedRight.text
         let kindValue: UInt64 = switch kind {
         case .unchanged: 0
         case .modified: 1
@@ -356,7 +373,8 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
         metadata = UInt64(storedLeft.number) |
             (UInt64(storedRight.number) << Self.lineNumberBits) |
-            (kindValue << (Self.lineNumberBits * 2))
+            (kindValue << (Self.lineNumberBits * 2)) |
+            (sharesText ? Self.sharesTextBit : 0)
     }
 
     private static func store(_ line: DiffLine?) -> (text: String?, number: Int) {
