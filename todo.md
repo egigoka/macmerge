@@ -29,14 +29,14 @@ Acceptance: user can open two files, apply individual changes in either directio
 
 - [x] Define stable C boundary for reusable comparison code.
 - [x] Reuse WinMerge's bundled xdiff engine instead of growing starter Swift line engine.
-- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 197-test Swift package baseline complete; broader Windows fixture parity pending).
+- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 198-test Swift package baseline complete; broader Windows fixture parity pending).
 - [-] Add encoding detection and lossless round trips (UTF-8/UTF-16 and verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 paths complete; ambiguity selection complete; broader Windows mapping parity pending).
 - [x] Preserve mixed line endings and final-newline state.
 - [x] Add whitespace, case, blank-line, line-filter, and substitution options.
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
 - [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
-- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, allocation-free editable sentinel, direct document-record comparison, and compact ordered difference-row indices complete; shallow row storage is 53.4 MiB at 1M rows, packaged 1M sparse comparison uses 573 MiB total resident memory, and 250k all-different rows use 271 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, allocation-free editable sentinel, direct document-record comparison, and compact ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use 268 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -87,7 +87,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [x] Dialog and property-page inventory: every `IDD_*` resource in `Src/Merge.rc` and `Src/resource.h`.
 - [x] Actual action and validation semantics: MFC message maps plus `ON_COMMAND` and `ON_UPDATE_COMMAND_UI` handlers.
 - [x] Windows rendered and interaction evidence: `Testing/GoogleTest/GUITests` and manual documentation.
-- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 197 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
+- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 198 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
 
 ### Required state matrix
 
@@ -474,8 +474,8 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ### Performance and UI integration tests
 
-- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets, and captures an Instruments trace when full Xcode provides `xctrace`; exported validation of completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals remains pending.
-- [-] Dense difference sets have deterministic core fixtures and packaged-harness support; extremely long lines, tabs, and wide Unicode remain pending.
+- [-] Deterministic release benchmarks cover 10k, 100k, 250k, and 1M rows with CSV timing, throughput, shallow row storage, resident growth, fixture export, semantic/invariant checks, and CI artifacts; packaged-app CI enforces 1M-row load, comparison, first-render, bottom-scroll, and resident-memory budgets, and captures an Instruments trace when full Xcode provides `xctrace`; 4 KiB long-line fixtures also run in CI; exported validation of completed `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` intervals remains pending.
+- [-] Dense difference sets have deterministic core fixtures and packaged-harness support; 4 KiB long-line fixtures are benchmarked; tabs and wide Unicode remain pending.
 - [ ] Assert comparison and render metadata stay off the main actor.
 - [ ] Assert stale canceled comparisons cannot publish over newer input.
 - [ ] UI-test selection, First/Current/Last, Next/Previous, copy, copy-and-advance, Copy All, Undo, Redo, Refresh, and Save against core results.
@@ -502,7 +502,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Continue reducing materialized 1M-row storage and benchmark dense differences and long lines.
+1. Continue reducing materialized 1M-row storage and benchmark tabs and wide Unicode (dense differences and 4 KiB lines complete).
 2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
 3. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
 4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.

@@ -45,6 +45,9 @@ jobs:
       - name: Benchmark dense text comparisons
         run: swift run -c release MacMergeBenchmark --lines 100000 --density dense > benchmark-dense.csv
 
+      - name: Benchmark long-line text comparisons
+        run: swift run -c release MacMergeBenchmark --lines 10000 --line-bytes 4096 > benchmark-long-lines.csv
+
       - name: Package application
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -82,6 +85,7 @@ jobs:
             MacMerge/dist/MacMerge.zip
             MacMerge/benchmark.csv
             MacMerge/benchmark-dense.csv
+            MacMerge/benchmark-long-lines.csv
             MacMerge/dist/performance-report.json
             MacMerge/dist/MacMerge-performance.trace
             MacMerge/dist/performance-trace-report.json

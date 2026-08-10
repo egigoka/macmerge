@@ -296,6 +296,10 @@ public struct DiffLine: Equatable, Sendable {
 }
 
 public struct DiffRow: Identifiable, Equatable, Sendable {
+    private static let lineNumberBits = 31
+    private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
+    private static let encodedLineNumber = Int(lineNumberMask)
+
     public struct ID: Hashable, Sendable {
         public let leftNumber: Int?
         public let rightNumber: Int?
@@ -306,18 +310,73 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
     }
 
-    public let left: DiffLine?
-    public let right: DiffLine?
-    public let kind: DiffKind
+    private let leftText: String?
+    private let rightText: String?
+    private let metadata: UInt64
+
+    private var storedLeftNumber: Int { Int(metadata & Self.lineNumberMask) }
+    private var storedRightNumber: Int {
+        Int((metadata >> Self.lineNumberBits) & Self.lineNumberMask)
+    }
+
+    public var kind: DiffKind {
+        switch metadata >> (Self.lineNumberBits * 2) {
+        case 0: .unchanged
+        case 1: .modified
+        case 2: .removed
+        default: .added
+        }
+    }
+
+    public var left: DiffLine? {
+        Self.line(text: leftText, storedNumber: storedLeftNumber)
+    }
+
+    public var right: DiffLine? {
+        Self.line(text: rightText, storedNumber: storedRightNumber)
+    }
 
     public var id: ID {
-        ID(leftNumber: left?.number, rightNumber: right?.number)
+        ID(
+            leftNumber: left?.number,
+            rightNumber: right?.number
+        )
     }
 
     public init(left: DiffLine?, right: DiffLine?, kind: DiffKind) {
-        self.left = left
-        self.right = right
-        self.kind = kind
+        let storedLeft = Self.store(left)
+        let storedRight = Self.store(right)
+        leftText = storedLeft.text
+        rightText = storedRight.text
+        let kindValue: UInt64 = switch kind {
+        case .unchanged: 0
+        case .modified: 1
+        case .removed: 2
+        case .added: 3
+        }
+        metadata = UInt64(storedLeft.number) |
+            (UInt64(storedRight.number) << Self.lineNumberBits) |
+            (kindValue << (Self.lineNumberBits * 2))
+    }
+
+    private static func store(_ line: DiffLine?) -> (text: String?, number: Int) {
+        guard let line else { return (nil, 0) }
+        if (1..<encodedLineNumber).contains(line.number) {
+            return (line.text, line.number)
+        }
+        return ("\(line.number)\0\(line.text)", encodedLineNumber)
+    }
+
+    private static func line(text: String?, storedNumber: Int) -> DiffLine? {
+        guard storedNumber != 0, let text else { return nil }
+        guard storedNumber == encodedLineNumber else {
+            return DiffLine(number: storedNumber, text: text)
+        }
+        guard let separator = text.firstIndex(of: "\0"),
+              let number = Int(text[..<separator]) else {
+            preconditionFailure("Invalid encoded line number")
+        }
+        return DiffLine(number: number, text: String(text[text.index(after: separator)...]))
     }
 }
 

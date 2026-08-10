@@ -3,6 +3,29 @@ import MacMergeCore
 import XCTest
 
 final class LineDiffTests: XCTestCase {
+    func testDiffRowStorageRemainsCompact() {
+        XCTAssertLessThanOrEqual(MemoryLayout<DiffRow>.stride, 40)
+
+        let maximumLine = Int(MMX_MAX_LINE_COUNT)
+        let row = DiffRow(
+            left: DiffLine(number: maximumLine, text: "left"),
+            right: DiffLine(number: maximumLine, text: "right"),
+            kind: .modified
+        )
+        XCTAssertEqual(row.left, DiffLine(number: maximumLine, text: "left"))
+        XCTAssertEqual(row.right, DiffLine(number: maximumLine, text: "right"))
+        XCTAssertEqual(row.kind, .modified)
+
+        let unusual = DiffRow(
+            left: DiffLine(number: -1, text: "left\0text"),
+            right: DiffLine(number: Int.max, text: "right"),
+            kind: .added
+        )
+        XCTAssertEqual(unusual.left, DiffLine(number: -1, text: "left\0text"))
+        XCTAssertEqual(unusual.right, DiffLine(number: Int.max, text: "right"))
+        XCTAssertEqual(unusual.kind, .added)
+    }
+
     func testUnchangedLinesRemainAligned() throws {
         let rows = try LineDiff.compare(left: "alpha\nbeta", right: "alpha\nbeta")
 

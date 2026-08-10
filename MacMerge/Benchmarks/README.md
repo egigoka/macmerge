@@ -16,6 +16,12 @@ swift run -c release MacMergeBenchmark --iterations 3 --lines 100000,1000000
 
 Exercise all rows as differences with `--density dense`. Packaged harnesses accept the same mode through `FIXTURE_DENSITY=dense`.
 
+Exercise long lines by setting their minimum UTF-8 payload size:
+
+```sh
+swift run -c release MacMergeBenchmark --lines 10000 --line-bytes 4096
+```
+
 Generate the same file pairs for packaged-app scrolling and Instruments runs:
 
 ```sh

@@ -2,6 +2,9 @@ import Darwin
 import Foundation
 import MacMergeCore
 
+private let maximumInputBytes = 64 * 1_048_576
+private let maximumLineCount = 1_048_576
+
 private struct Configuration {
     enum Density: String {
         case sparse
@@ -12,6 +15,7 @@ private struct Configuration {
     var iterations = 1
     var fixtureDirectory: URL?
     var density = Density.sparse
+    var lineBytes: Int?
 
     init(arguments: ArraySlice<String>) throws {
         var index = arguments.startIndex
@@ -44,6 +48,13 @@ private struct Configuration {
                     throw ArgumentError.invalidValue(argument, index < arguments.endIndex ? arguments[index] : "")
                 }
                 density = value
+            case "--line-bytes":
+                index = arguments.index(after: index)
+                guard index < arguments.endIndex,
+                      let value = Int(arguments[index]), value > 0 else {
+                    throw ArgumentError.invalidValue(argument, index < arguments.endIndex ? arguments[index] : "")
+                }
+                lineBytes = value
             case "--help", "-h":
                 printUsage()
                 exit(EXIT_SUCCESS)
@@ -77,6 +88,7 @@ private struct Fixture {
 
 private struct Result {
     let lines: Int
+    let minimumLineBytes: Int?
     let inputBytes: Int
     let rows: Int
     let differences: Int
@@ -85,20 +97,28 @@ private struct Result {
     let residentDeltaBytes: Int64
 }
 
-private func fixture(lineCount: Int, density: Configuration.Density) -> Fixture {
+private func fixtureLine(_ prefix: String, minimumBytes: Int?) -> String {
+    prefix + String(repeating: "x", count: max(0, (minimumBytes ?? 0) - prefix.utf8.count))
+}
+
+private func fixture(
+    lineCount: Int,
+    density: Configuration.Density,
+    lineBytes: Int?
+) -> Fixture {
     var left = ""
     var right = ""
-    let estimatedBytes = lineCount * 16
+    let estimatedBytes = min(maximumInputBytes, lineCount * (max(16, lineBytes ?? 0) + 1))
     left.reserveCapacity(estimatedBytes)
     right.reserveCapacity(estimatedBytes)
     let changeStride = density == .dense ? 1 : max(1, lineCount / 10)
     var differences = 0
 
     for line in 0..<lineCount {
-        let common = "line-\(line)"
+        let common = fixtureLine("line-\(line)", minimumBytes: lineBytes)
         left += common
         if line % changeStride == changeStride / 2 {
-            right += "changed-\(line)"
+            right += fixtureLine("changed-\(line)", minimumBytes: lineBytes)
             differences += 1
         } else {
             right += common
@@ -116,9 +136,18 @@ private func benchmark(
     lineCount: Int,
     iterations: Int,
     fixtureDirectory: URL?,
-    density: Configuration.Density
+    density: Configuration.Density,
+    lineBytes: Int?
 ) throws -> Result {
-    let input = fixture(lineCount: lineCount, density: density)
+    guard lineCount <= maximumLineCount else { throw BenchmarkError.fixtureTooLarge }
+    let longestPrefixBytes = "changed-\(lineCount - 1)".utf8.count
+    let effectiveLineBytes = max(lineBytes ?? 0, longestPrefixBytes)
+    let (contentBytes, overflowed) = lineCount.multipliedReportingOverflow(by: effectiveLineBytes)
+    guard !overflowed,
+          contentBytes <= maximumInputBytes - max(0, lineCount - 1) else {
+        throw BenchmarkError.fixtureTooLarge
+    }
+    let input = fixture(lineCount: lineCount, density: density, lineBytes: lineBytes)
     if let fixtureDirectory {
         try write(input, lineCount: lineCount, to: fixtureDirectory)
     }
@@ -153,6 +182,7 @@ private func benchmark(
 
     return Result(
         lines: lineCount,
+        minimumLineBytes: lineBytes,
         inputBytes: input.left.utf8.count + input.right.utf8.count,
         rows: finalRows.count,
         differences: summary.differences,
@@ -177,6 +207,7 @@ private func write(_ fixture: Fixture, lineCount: Int, to directory: URL) throws
 }
 
 private enum BenchmarkError: Error, CustomStringConvertible {
+    case fixtureTooLarge
     case invalidAlignment
     case semanticCheckFailed(String)
     case unexpectedDifferences(expected: Int, actual: Int)
@@ -184,6 +215,8 @@ private enum BenchmarkError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
+        case .fixtureTooLarge:
+            "Requested fixture exceeds the 64 MiB per-file comparison limit."
         case .invalidAlignment:
             "Comparison produced non-monotonic boundary line numbers."
         case let .semanticCheckFailed(name):
@@ -667,6 +700,7 @@ private func printUsage() {
     print("""
     Usage: MacMergeBenchmark [--lines 10000,100000,250000,1000000] [--iterations 1]
                              [--fixture-directory PATH] [--density sparse|dense]
+                             [--line-bytes COUNT]
 
     Runs deterministic text comparisons and reports best elapsed time,
     throughput, shallow DiffRow storage, and resident-memory growth.
@@ -680,17 +714,19 @@ private func mebibytes(_ bytes: Int64) -> String {
 do {
     let configuration = try Configuration(arguments: CommandLine.arguments.dropFirst())
     try validateComparisonSemantics()
-    print("density,lines,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
+    print("density,lines,minimum_line_bytes,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
     for lineCount in configuration.lineCounts {
         let result = try benchmark(
             lineCount: lineCount,
             iterations: configuration.iterations,
             fixtureDirectory: configuration.fixtureDirectory,
-            density: configuration.density
+            density: configuration.density,
+            lineBytes: configuration.lineBytes
         )
         print([
             configuration.density.rawValue,
             String(result.lines),
+            result.minimumLineBytes.map(String.init) ?? "variable",
             mebibytes(Int64(result.inputBytes)),
             String(result.rows),
             String(result.differences),
