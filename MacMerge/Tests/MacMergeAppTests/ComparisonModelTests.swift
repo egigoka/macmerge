@@ -5,6 +5,62 @@ import XCTest
 
 @MainActor
 final class ComparisonModelTests: XCTestCase {
+    func testLocationMapCompactsRunsAndMapsFractionsToRows() {
+        let rows = [
+            DiffRow(left: DiffLine(number: 1, text: "same"), right: DiffLine(number: 1, text: "same"), kind: .unchanged),
+            DiffRow(left: DiffLine(number: 2, text: "left"), right: DiffLine(number: 2, text: "right"), kind: .modified),
+            DiffRow(left: DiffLine(number: 3, text: "left"), right: DiffLine(number: 3, text: "right"), kind: .modified),
+            DiffRow(left: DiffLine(number: 4, text: "removed"), right: nil, kind: .removed),
+            DiffRow(left: nil, right: DiffLine(number: 4, text: "added"), kind: .added),
+            DiffRow(left: DiffLine(number: 5, text: "same"), right: DiffLine(number: 5, text: "same"), kind: .unchanged),
+        ]
+
+        let map = LocationMap(rows: rows)
+
+        XCTAssertEqual(map.rowCount, 6)
+        XCTAssertEqual(map.blocks, [
+            LocationMapBlock(startRow: 1, endRow: 3, kind: .modified),
+            LocationMapBlock(startRow: 3, endRow: 4, kind: .removed),
+            LocationMapBlock(startRow: 4, endRow: 5, kind: .added),
+        ])
+        XCTAssertEqual(map.shallowStorageBytes, 3 * MemoryLayout<UInt64>.stride)
+        XCTAssertEqual(map.rowIndex(at: -1), 0)
+        XCTAssertEqual(map.rowIndex(at: 0.5), 3)
+        XCTAssertEqual(map.rowIndex(at: 1), 5)
+        XCTAssertNil(map.rowIndex(at: .nan))
+        XCTAssertNil(LocationMap().rowIndex(at: 0.5))
+    }
+
+    func testLocationViewportNormalizesBounds() {
+        XCTAssertEqual(LocationViewport(startRow: -5, endRow: 4), LocationViewport(startRow: 0, endRow: 4))
+        XCTAssertEqual(LocationViewport(startRow: 8, endRow: 3), LocationViewport(startRow: 8, endRow: 8))
+        XCTAssertEqual(LocationViewport(startRow: 3, endRow: 9).rowCount, 6)
+
+        let viewport = LocationViewport(startRow: 450, endRow: 550)
+        let position = viewport.position(totalRowCount: 1_000)
+        XCTAssertEqual(position, 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(viewport.centeredRow(at: position, totalRowCount: 1_000), 500)
+        XCTAssertEqual(viewport.centeredRow(at: 0, totalRowCount: 1_000), 50)
+        XCTAssertEqual(viewport.centeredRow(at: 1, totalRowCount: 1_000), 950)
+        XCTAssertNil(viewport.centeredRow(at: .nan, totalRowCount: 1_000))
+        XCTAssertNil(viewport.centeredRow(at: 0.5, totalRowCount: 0))
+    }
+
+    func testLocationMapWorstCaseStorageUsesOneWordPerRun() {
+        var map = LocationMap()
+        for index in 0 ..< 100_000 {
+            map.append(index.isMultiple(of: 2) ? .modified : .added)
+        }
+
+        XCTAssertEqual(map.blockCount, 100_000)
+        XCTAssertEqual(map.shallowStorageBytes, 100_000 * MemoryLayout<UInt64>.stride)
+        XCTAssertEqual(map.block(at: 99_999), LocationMapBlock(
+            startRow: 99_999,
+            endRow: 100_000,
+            kind: .added
+        ))
+    }
+
     func testDifferenceLocationsUseCompactCollisionSafeStorage() {
         let rows = (1...1_000).map { number in
             let omitsLeft = number.isMultiple(of: 3)
@@ -269,6 +325,8 @@ final class ComparisonModelTests: XCTestCase {
         await waitUntilIdle(model)
         let differenceIDs = model.rows.filter { $0.kind != .unchanged }.map(\.id)
         XCTAssertEqual(differenceIDs.count, 3)
+        XCTAssertEqual(model.locationMap.rowCount, model.rows.count)
+        XCTAssertEqual(model.locationMap.blocks.map(\.kind), [.modified, .modified, .modified])
 
         model.selectLastDifference()
         XCTAssertEqual(model.selectedDifferenceID, differenceIDs.last)

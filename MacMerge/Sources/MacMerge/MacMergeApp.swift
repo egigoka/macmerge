@@ -740,7 +740,107 @@ private struct ComparisonRenderResult: Sendable {
     let maximumLineColumns: Int
     let differenceLocations: DifferenceLocations
     let differenceRowIndices: [UInt32]
+    let locationMap: LocationMap
     let summary: DiffSummary
+}
+
+struct LocationMapBlock: Equatable, Sendable {
+    let startRow: UInt32
+    let endRow: UInt32
+    let kind: DiffKind
+}
+
+struct LocationMap: Equatable, Sendable {
+    private static let rowBits = 21
+    private static let rowMask = (UInt64(1) << rowBits) - 1
+    private(set) var rowCount = 0
+    private var entries: [UInt64] = []
+
+    init() {}
+
+    init(rows: [DiffRow]) {
+        for row in rows {
+            append(row.kind)
+        }
+    }
+
+    mutating func append(_ kind: DiffKind) {
+        guard let rowIndex = UInt32(exactly: rowCount) else {
+            preconditionFailure("Location map exceeds comparison limits")
+        }
+        rowCount += 1
+        guard kind != .unchanged else { return }
+        if let lastIndex = entries.indices.last,
+           block(at: lastIndex).kind == kind,
+           block(at: lastIndex).endRow == rowIndex {
+            let startRow = block(at: lastIndex).startRow
+            entries[lastIndex] = Self.pack(startRow: startRow, endRow: rowIndex + 1, kind: kind)
+        } else {
+            entries.append(Self.pack(startRow: rowIndex, endRow: rowIndex + 1, kind: kind))
+        }
+    }
+
+    var blockCount: Int { entries.count }
+    var shallowStorageBytes: Int { entries.count * MemoryLayout<UInt64>.stride }
+    var blocks: [LocationMapBlock] { entries.indices.map(block(at:)) }
+
+    func block(at index: Int) -> LocationMapBlock {
+        let entry = entries[index]
+        let kind: DiffKind = switch entry >> (Self.rowBits * 2) {
+        case 1: .modified
+        case 2: .removed
+        default: .added
+        }
+        return LocationMapBlock(
+            startRow: UInt32(entry & Self.rowMask),
+            endRow: UInt32((entry >> Self.rowBits) & Self.rowMask),
+            kind: kind
+        )
+    }
+
+    func rowIndex(at fraction: Double) -> Int? {
+        guard rowCount > 0, fraction.isFinite else { return nil }
+        let clamped = min(max(0, fraction), 1)
+        return min(rowCount - 1, Int((Double(rowCount) * clamped).rounded(.down)))
+    }
+
+    private static func pack(startRow: UInt32, endRow: UInt32, kind: DiffKind) -> UInt64 {
+        precondition(UInt64(startRow) <= rowMask && UInt64(endRow) <= rowMask)
+        let kindValue: UInt64 = switch kind {
+        case .modified: 1
+        case .removed: 2
+        case .added: 3
+        case .unchanged: 0
+        }
+        return UInt64(startRow) | (UInt64(endRow) << rowBits) | (kindValue << (rowBits * 2))
+    }
+}
+
+struct LocationViewport: Equatable, Sendable {
+    let startRow: Int
+    let endRow: Int
+
+    static let empty = LocationViewport(startRow: 0, endRow: 0)
+
+    init(startRow: Int, endRow: Int) {
+        self.startRow = max(0, startRow)
+        self.endRow = max(self.startRow, endRow)
+    }
+
+    var rowCount: Int { endRow - startRow }
+
+    func position(totalRowCount: Int) -> Double {
+        let maximumStart = max(0, totalRowCount - rowCount)
+        guard maximumStart > 0 else { return 0 }
+        return Double(min(startRow, maximumStart)) / Double(maximumStart)
+    }
+
+    func centeredRow(at position: Double, totalRowCount: Int) -> Int? {
+        guard totalRowCount > 0, position.isFinite else { return nil }
+        let maximumStart = max(0, totalRowCount - rowCount)
+        let targetStart = Int((Double(maximumStart) * min(max(0, position), 1)).rounded())
+        return min(totalRowCount - 1, targetStart + rowCount / 2)
+    }
 }
 
 struct DifferenceLocation: Sendable {
@@ -843,7 +943,9 @@ private func computeComparison(
     let rows = try LineDiff.compare(left: left, right: right, options: options)
     var maximumLineColumns = 0
     var differenceRowIndices: [UInt32] = []
+    var locationMap = LocationMap()
     for (index, row) in rows.enumerated() {
+        locationMap.append(row.kind)
         maximumLineColumns = max(
             maximumLineColumns,
             row.left.map { displayColumnCount($0.text) } ?? 0,
@@ -865,6 +967,7 @@ private func computeComparison(
         maximumLineColumns: maximumLineColumns,
         differenceLocations: differenceLocations,
         differenceRowIndices: differenceRowIndices,
+        locationMap: locationMap,
         summary: DiffSummary(rows: rows)
     )
 }
@@ -946,6 +1049,7 @@ final class ComparisonModel {
     private(set) var maximumLineColumns = 0
     private(set) var differenceLocations = DifferenceLocations()
     private(set) var differenceRowIndices: [UInt32] = []
+    private(set) var locationMap = LocationMap()
     private(set) var summary = DiffSummary(rows: [])
     private(set) var selectedDifferenceID: DiffRow.ID?
     private(set) var currentRowID: DiffRow.ID?
@@ -1059,6 +1163,7 @@ final class ComparisonModel {
         maximumLineColumns = 0
         differenceLocations = DifferenceLocations()
         differenceRowIndices = []
+        locationMap = LocationMap()
         summary = DiffSummary(rows: [])
         selectedDifferenceID = nil
         currentRowID = nil
@@ -1762,6 +1867,7 @@ final class ComparisonModel {
             maximumLineColumns = 0
             differenceLocations = DifferenceLocations()
             differenceRowIndices = []
+            locationMap = LocationMap()
             summary = DiffSummary(rows: [])
             comparisonFailed = false
             return
@@ -1782,6 +1888,7 @@ final class ComparisonModel {
                     maximumLineColumns = comparison.maximumLineColumns
                     differenceLocations = comparison.differenceLocations
                     differenceRowIndices = comparison.differenceRowIndices
+                    locationMap = comparison.locationMap
                     summary = comparison.summary
                     comparisonFailed = false
                     isComparisonCurrent = true
@@ -1799,6 +1906,7 @@ final class ComparisonModel {
                     maximumLineColumns = 0
                     differenceLocations = DifferenceLocations()
                     differenceRowIndices = []
+                    locationMap = LocationMap()
                     summary = DiffSummary(rows: [])
                     comparisonFailed = true
                     isComparisonCurrent = false
@@ -1843,6 +1951,7 @@ final class ComparisonModel {
                 maximumLineColumns = comparison.maximumLineColumns
                 differenceLocations = comparison.differenceLocations
                 differenceRowIndices = comparison.differenceRowIndices
+                locationMap = comparison.locationMap
                 summary = comparison.summary
                 comparisonFailed = false
                 isComparisonCurrent = true
@@ -1854,6 +1963,7 @@ final class ComparisonModel {
                 maximumLineColumns = 0
                 differenceLocations = DifferenceLocations()
                 differenceRowIndices = []
+                locationMap = LocationMap()
                 summary = DiffSummary(rows: [])
                 comparisonFailed = true
                 isComparisonCurrent = false
@@ -2244,6 +2354,7 @@ private struct ComparisonView: View {
                         rowsRevision: model.rowsRevision,
                         maximumLineColumns: model.maximumLineColumns,
                         differenceLocations: model.differenceLocations,
+                        locationMap: model.locationMap,
                         selectedDifferenceID: model.selectedDifferenceID,
                         selectedDifferenceRevealRevision: model.selectedDifferenceRevealRevision,
                         lineDifferenceSelectionRevision: model.lineDifferenceSelectionRevision,
@@ -2904,6 +3015,7 @@ private struct DiffCanvas: View {
     let rowsRevision: Int
     let maximumLineColumns: Int
     let differenceLocations: DifferenceLocations
+    let locationMap: LocationMap
     let selectedDifferenceID: DiffRow.ID?
     let selectedDifferenceRevealRevision: Int
     let lineDifferenceSelectionRevision: Int
@@ -2919,30 +3031,230 @@ private struct DiffCanvas: View {
     let finishEditingLeft: (DiffRow.ID) -> Void
     let finishEditingRight: (DiffRow.ID) -> Void
     let contextMenuActions: DiffContextMenuActions
+    @State private var viewport = LocationViewport.empty
+    @State private var navigationRow: Int?
+    @State private var navigationRevision = 0
 
     var body: some View {
-        DiffTableView(
-            rows: rows,
-            rowsRevision: rowsRevision,
-            maximumLineColumns: maximumLineColumns,
-            differenceLocations: differenceLocations,
-            selectedDifferenceID: selectedDifferenceID,
-            selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
-            lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
-            paneFocusRevision: paneFocusRevision,
-            paneFocusRowID: paneFocusRowID,
-            activeSide: activeSide,
-            leftEditable: leftEditable,
-            rightEditable: rightEditable,
-            selectDifference: selectDifference,
-            activateSide: activateSide,
-            editLeft: editLeft,
-            editRight: editRight,
-            finishEditingLeft: finishEditingLeft,
-            finishEditingRight: finishEditingRight,
-            contextMenuActions: contextMenuActions
+        HStack(spacing: 0) {
+            DiffTableView(
+                rows: rows,
+                rowsRevision: rowsRevision,
+                maximumLineColumns: maximumLineColumns,
+                differenceLocations: differenceLocations,
+                selectedDifferenceID: selectedDifferenceID,
+                selectedDifferenceRevealRevision: selectedDifferenceRevealRevision,
+                lineDifferenceSelectionRevision: lineDifferenceSelectionRevision,
+                paneFocusRevision: paneFocusRevision,
+                paneFocusRowID: paneFocusRowID,
+                activeSide: activeSide,
+                leftEditable: leftEditable,
+                rightEditable: rightEditable,
+                navigationRow: navigationRow,
+                navigationRevision: navigationRevision,
+                viewportChanged: updateViewport,
+                selectDifference: selectDifference,
+                activateSide: activateSide,
+                editLeft: editLeft,
+                editRight: editRight,
+                finishEditingLeft: finishEditingLeft,
+                finishEditingRight: finishEditingRight,
+                contextMenuActions: contextMenuActions
+            )
+            .background(Color(nsColor: .textBackgroundColor))
+
+            Divider()
+
+            LocationPane(
+                map: locationMap,
+                viewport: viewport,
+                selectedRow: selectedDifferenceID.flatMap { differenceLocations[$0]?.rowIndex },
+                navigate: navigate
+            )
+            .frame(width: 92)
+        }
+    }
+
+    private func updateViewport(_ next: LocationViewport) {
+        guard viewport != next else { return }
+        viewport = next
+    }
+
+    private func navigate(to rowIndex: Int, side: ComparisonSide) {
+        navigationRow = rowIndex
+        navigationRevision &+= 1
+        activateSide(side)
+    }
+}
+
+private struct LocationPane: View {
+    let map: LocationMap
+    let viewport: LocationViewport
+    let selectedRow: Int?
+    let navigate: (Int, ComparisonSide) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            LocationBar(
+                side: .left,
+                map: map,
+                viewport: viewport,
+                selectedRow: selectedRow,
+                navigate: navigate
+            )
+            LocationBar(
+                side: .right,
+                map: map,
+                viewport: viewport,
+                selectedRow: selectedRow,
+                navigate: navigate
+            )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .underPageBackgroundColor))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Location Pane")
+    }
+}
+
+private struct LocationBar: View {
+    let side: ComparisonSide
+    let map: LocationMap
+    let viewport: LocationViewport
+    let selectedRow: Int?
+    let navigate: (Int, ComparisonSide) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            ZStack {
+                LocationMarks(map: map, side: side)
+                LocationIndicator(
+                    rowCount: map.rowCount,
+                    viewport: viewport,
+                    selectedRow: selectedRow
+                )
+            }
+            .contentShape(.rect)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard size.height > 0,
+                              let row = map.rowIndex(at: Double(value.location.y / size.height)) else {
+                            return
+                        }
+                        navigate(row, side)
+                    }
+            )
+            .accessibilityRepresentation {
+                Slider(value: accessibilityPosition, in: 0...1) {
+                    Text("\(side == .left ? "Left" : "Right") file location map")
+                }
+                .accessibilityValue(accessibilityValue)
+                .accessibilityHint("Adjust to scroll the comparison")
+                .disabled(map.rowCount == 0)
+            }
+        }
+    }
+
+    private var accessibilityPosition: Binding<Double> {
+        Binding(
+            get: { viewport.position(totalRowCount: map.rowCount) },
+            set: { fraction in
+                guard let row = viewport.centeredRow(at: fraction, totalRowCount: map.rowCount) else {
+                    return
+                }
+                navigate(row, side)
+            }
         )
-        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var accessibilityValue: String {
+        guard map.rowCount > 0 else { return "Empty comparison" }
+        return "Comparison rows \(viewport.startRow + 1) through \(max(viewport.startRow + 1, viewport.endRow)) of \(map.rowCount)"
+    }
+}
+
+private struct LocationMarks: View {
+    let map: LocationMap
+    let side: ComparisonSide
+
+    var body: some View {
+        Canvas { context, size in
+            let bounds = CGRect(origin: .zero, size: size)
+            context.fill(Path(bounds), with: .color(Color(nsColor: .textBackgroundColor)))
+            context.stroke(Path(bounds), with: .color(.secondary.opacity(0.55)), lineWidth: 1)
+            guard map.rowCount > 0, size.height > 0 else { return }
+
+            let scale = size.height / CGFloat(map.rowCount)
+            for index in 0 ..< map.blockCount {
+                let block = map.block(at: index)
+                guard isVisible(block.kind) else { continue }
+                let top = CGFloat(block.startRow) * scale
+                let bottom = CGFloat(block.endRow) * scale
+                let inset: CGFloat = block.kind == .modified ? 1 : 4
+                let blockRect = CGRect(
+                    x: inset,
+                    y: top,
+                    width: max(0, size.width - inset * 2),
+                    height: max(1, bottom - top)
+                )
+                context.fill(Path(blockRect), with: .color(color(for: block.kind)))
+                if block.kind != .modified {
+                    context.stroke(Path(blockRect), with: .color(.primary.opacity(0.55)), lineWidth: 1)
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func isVisible(_ kind: DiffKind) -> Bool {
+        switch (kind, side) {
+        case (.modified, _), (.removed, .left), (.added, .right): true
+        default: false
+        }
+    }
+
+    private func color(for kind: DiffKind) -> Color {
+        switch kind {
+        case .modified: .orange.opacity(0.72)
+        case .removed: .red.opacity(0.72)
+        case .added: .teal.opacity(0.72)
+        case .unchanged: .clear
+        }
+    }
+}
+
+private struct LocationIndicator: View {
+    let rowCount: Int
+    let viewport: LocationViewport
+    let selectedRow: Int?
+
+    var body: some View {
+        Canvas { context, size in
+            guard rowCount > 0, size.height > 0 else { return }
+            let scale = size.height / CGFloat(rowCount)
+            let viewportTop = CGFloat(min(viewport.startRow, rowCount)) * scale
+            let viewportBottom = CGFloat(min(viewport.endRow, rowCount)) * scale
+            let viewportRect = CGRect(
+                x: 0,
+                y: viewportTop,
+                width: size.width,
+                height: max(2, viewportBottom - viewportTop)
+            ).intersection(CGRect(origin: .zero, size: size))
+            context.fill(Path(viewportRect), with: .color(.primary.opacity(0.12)))
+            context.stroke(Path(viewportRect), with: .color(.primary.opacity(0.6)), lineWidth: 1)
+
+            if let selectedRow {
+                let y = min(size.height - 1, max(1, CGFloat(selectedRow) * scale))
+                var marker = Path()
+                marker.move(to: CGPoint(x: 0, y: y))
+                marker.addLine(to: CGPoint(x: min(7, size.width), y: y))
+                context.stroke(marker, with: .color(.accentColor), lineWidth: 2)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -2959,6 +3271,9 @@ private struct DiffTableView: NSViewRepresentable {
     let activeSide: ComparisonSide
     let leftEditable: Bool
     let rightEditable: Bool
+    let navigationRow: Int?
+    let navigationRevision: Int
+    let viewportChanged: (LocationViewport) -> Void
     let selectDifference: (DiffRow.ID?) -> Void
     let activateSide: (ComparisonSide) -> Void
     let editLeft: (DiffRow.ID, String) -> Void
@@ -2978,6 +3293,8 @@ private struct DiffTableView: NSViewRepresentable {
             leftEditable: leftEditable,
             rightEditable: rightEditable,
             appendsEditableRow: leftEditable || rightEditable,
+            navigationRevision: navigationRevision,
+            viewportChanged: viewportChanged,
             selectDifference: selectDifference,
             activateSide: activateSide,
             editLeft: editLeft,
@@ -3010,6 +3327,7 @@ private struct DiffTableView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
+        scrollView.contentView.postsBoundsChangedNotifications = true
         let container = DiffTableContainerView(scrollView: scrollView)
         scrollView.horizontalScrollHandler = { [weak coordinator = context.coordinator] delta in
             coordinator?.scrollHorizontally(by: delta)
@@ -3020,6 +3338,7 @@ private struct DiffTableView: NSViewRepresentable {
         container.horizontalScroller.target = context.coordinator
         container.horizontalScroller.action = #selector(Coordinator.scrollHorizontally(_:))
         context.coordinator.container = container
+        context.coordinator.observeViewport(in: scrollView.contentView)
         return container
     }
 
@@ -3032,6 +3351,7 @@ private struct DiffTableView: NSViewRepresentable {
         context.coordinator.finishEditingLeft = finishEditingLeft
         context.coordinator.finishEditingRight = finishEditingRight
         context.coordinator.contextMenuActions = contextMenuActions
+        context.coordinator.viewportChanged = viewportChanged
         context.coordinator.differenceLocations = differenceLocations
         let editabilityChanged = context.coordinator.leftEditable != leftEditable
             || context.coordinator.rightEditable != rightEditable
@@ -3086,6 +3406,12 @@ private struct DiffTableView: NSViewRepresentable {
         if paneFocusRequested {
             context.coordinator.focusEditor(on: activeSide, rowID: paneFocusRowID)
         }
+        if context.coordinator.navigationRevision != navigationRevision,
+           let navigationRow {
+            context.coordinator.navigationRevision = navigationRevision
+            context.coordinator.scroll(toCenteredRow: navigationRow)
+        }
+        context.coordinator.reportViewport()
     }
 
     @MainActor
@@ -3101,6 +3427,8 @@ private struct DiffTableView: NSViewRepresentable {
         var leftEditable: Bool
         var rightEditable: Bool
         var appendsEditableRow: Bool
+        var navigationRevision: Int
+        var viewportChanged: (LocationViewport) -> Void
         var selectDifference: (DiffRow.ID?) -> Void
         var activateSide: (ComparisonSide) -> Void
         var editLeft: (DiffRow.ID, String) -> Void
@@ -3115,6 +3443,8 @@ private struct DiffTableView: NSViewRepresentable {
         private var firstVisibleRowSignpostID: OSSignpostID?
         private var autoScrollSignpostID: OSSignpostID?
         private var didAutoScroll = false
+        nonisolated(unsafe) private var viewportObserver: NSObjectProtocol?
+        private var lastReportedViewport: LocationViewport?
 
         private struct PendingEditorFocus {
             let side: ComparisonSide
@@ -3131,6 +3461,8 @@ private struct DiffTableView: NSViewRepresentable {
             leftEditable: Bool,
             rightEditable: Bool,
             appendsEditableRow: Bool,
+            navigationRevision: Int,
+            viewportChanged: @escaping (LocationViewport) -> Void,
             selectDifference: @escaping (DiffRow.ID?) -> Void,
             activateSide: @escaping (ComparisonSide) -> Void,
             editLeft: @escaping (DiffRow.ID, String) -> Void,
@@ -3148,6 +3480,8 @@ private struct DiffTableView: NSViewRepresentable {
             self.leftEditable = leftEditable
             self.rightEditable = rightEditable
             self.appendsEditableRow = appendsEditableRow
+            self.navigationRevision = navigationRevision
+            self.viewportChanged = viewportChanged
             self.selectDifference = selectDifference
             self.activateSide = activateSide
             self.editLeft = editLeft
@@ -3156,6 +3490,12 @@ private struct DiffTableView: NSViewRepresentable {
             self.finishEditingRight = finishEditingRight
             self.contextMenuActions = contextMenuActions
             super.init()
+        }
+
+        deinit {
+            if let viewportObserver {
+                NotificationCenter.default.removeObserver(viewportObserver)
+            }
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
@@ -3263,6 +3603,55 @@ private struct DiffTableView: NSViewRepresentable {
             self.rows = rows
             rowsRevision = revision
             self.differenceLocations = differenceLocations
+            lastReportedViewport = nil
+        }
+
+        func observeViewport(in clipView: NSClipView) {
+            if let viewportObserver {
+                NotificationCenter.default.removeObserver(viewportObserver)
+            }
+            viewportObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: clipView,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.reportViewport()
+                }
+            }
+        }
+
+        func reportViewport() {
+            guard let tableView, !rows.isEmpty else {
+                publishViewport(.empty)
+                return
+            }
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            guard visibleRows.location != NSNotFound else { return }
+            let start = min(rows.count, visibleRows.location)
+            let end = min(rows.count, NSMaxRange(visibleRows))
+            publishViewport(LocationViewport(startRow: start, endRow: end))
+        }
+
+        func scroll(toCenteredRow rowIndex: Int) {
+            guard let tableView, let scrollView = tableView.enclosingScrollView, !rows.isEmpty else {
+                return
+            }
+            let row = min(max(0, rowIndex), rows.count - 1)
+            let rowRect = tableView.rect(ofRow: row)
+            let maximumY = max(0, tableView.bounds.height - scrollView.contentSize.height)
+            let targetY = min(maximumY, max(0, rowRect.midY - scrollView.contentSize.height / 2))
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            reportViewport()
+        }
+
+        private func publishViewport(_ viewport: LocationViewport) {
+            guard lastReportedViewport != viewport else { return }
+            lastReportedViewport = viewport
+            DispatchQueue.main.async { [viewportChanged] in
+                viewportChanged(viewport)
+            }
         }
 
         func refreshVisibleRows(for ids: [DiffRow.ID]) {

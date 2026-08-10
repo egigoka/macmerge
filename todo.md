@@ -29,7 +29,7 @@ Acceptance: user can open two files, apply individual changes in either directio
 
 - [x] Define stable C boundary for reusable comparison code.
 - [x] Reuse WinMerge's bundled xdiff engine instead of growing starter Swift line engine.
-- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 200-test Swift package baseline complete; broader Windows fixture parity pending).
+- [-] Run shared behavior tests against WinMerge comparison fixtures (no-EOL, algorithm alignment, line filters, substitutions, ignore-blank-line post-splitting, allocation recovery, and a 203-test Swift package baseline complete; broader Windows fixture parity pending).
 - [-] Add encoding detection and lossless round trips (UTF-8/UTF-16 and verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 paths complete; ambiguity selection complete; broader Windows mapping parity pending).
 - [x] Preserve mixed line endings and final-newline state.
 - [x] Add whitespace, case, blank-line, line-filter, and substitution options.
@@ -87,7 +87,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [x] Dialog and property-page inventory: every `IDD_*` resource in `Src/Merge.rc` and `Src/resource.h`.
 - [x] Actual action and validation semantics: MFC message maps plus `ON_COMMAND` and `ON_UPDATE_COMMAND_UI` handlers.
 - [x] Windows rendered and interaction evidence: `Testing/GoogleTest/GUITests` and manual documentation.
-- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 200 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
+- [-] Mac implementation evidence: `MacMerge/Sources/MacMerge`, 203 passing package tests, packaged `.app` AX snapshots, packaged performance reports, a full-Xcode Instruments capture harness, and installed-app smoke tests.
 
 ### Required state matrix
 
@@ -137,7 +137,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 
 - [MISSING] MDI/document tab bar and tab context menu; replace with native windows/tabs while preserving dirty state, close-other/left/right, width, and restoration outcomes.
 - [PARTIAL] `IDD_EDITOR_HEADERBAR`: side caption, filename, dirty state, open, and save exist; editable path, history, read-only, clipboard, plugin state, and header context menu are missing.
-- [MISSING] Location Pane: whole-file map, moved blocks, click navigation, and context menu.
+- [PARTIAL] Location Pane: native two-pane scaled bars render packed significant-difference runs with editor colors and non-color shapes, selected marker, live viewport shading, click/drag centered navigation, and disabled-safe adjustable AX sliders; compact/worst-case model tests, strict debug/release builds, packaged screenshot/AX checks, real click-navigation smoke, and sparse/dense performance budgets pass. Three-pane bars, moved-block connectors, wheel forwarding, Go to Line/context settings, visibility, width/state persistence, automated UI interaction, and dark/high-contrast screenshots remain pending.
 - [MISSING] Diff/Detail Pane: selected word/character difference detail and merge controls driven by the same intra-line model.
 - [MISSING] Output Pane: message log plus Copy, Select All, Clear All, visibility, and persistence.
 - [MISSING] `IDD_DISPLAY_FILTER_BAR`: expression, history/presets, apply/close, text/folder variants, and restoration.
@@ -502,8 +502,9 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Replace distinct materialized row text with source-range-backed access; exact-equal text sharing, packed rows, single-word difference locations, UInt32 ordered indices, and dense/4 KiB/tab-heavy/wide-Unicode benchmarks are complete.
-2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
-3. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
-4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
-5. Expand into directory comparison after text-core behavior is fixture-compatible.
+1. Finish Location Pane parity: two-pane map, significant-difference blocks, selected marker, viewport shading, click/drag navigation, adjustable accessibility, model tests, packaged AX/screenshot smoke, and performance checks are complete; moved connectors, context commands, visibility, persistence, and automated UI interaction remain.
+2. Replace distinct materialized row text with source-range-backed access; exact-equal text sharing, packed rows, single-word difference locations, UInt32 ordered indices, and dense/4 KiB/tab-heavy/wide-Unicode benchmarks are complete.
+3. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
+4. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
+5. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.
+6. Expand into directory comparison after text-core behavior is fixture-compatible.
