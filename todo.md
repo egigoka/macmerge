@@ -36,7 +36,7 @@ Acceptance: user can open two files, apply individual changes in either directio
 - [x] Apply filters and substitutions to complete native diff hunks without hiding adjacent real changes.
 - [x] Bound coordinated file loads and preserve symlink targets and recoverable save backups.
 - [-] Detect moved blocks and expose intra-line differences (intra-line highlighting and selection complete; moved-block detection pending).
-- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, compact difference-location hashing, allocation-free editable sentinel, direct document-record comparison, and UInt32 ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use about 249 MiB; row model remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
+- [-] Handle large files without materializing every rendered row (reusable native table, off-main render metadata, derived row IDs, packed row metadata, single-word difference-location hashing, allocation-free editable sentinel, direct document-record comparison, and UInt32 ordered difference-row indices complete; shallow row storage is 38.1 MiB at 1M rows, packaged 1M sparse comparison uses 564 MiB total resident memory, and 250k all-different rows use 246 MiB; row text remains materialized; current safety limits: 64 MiB and 1,048,576 lines per side).
 
 Acceptance: supported text comparisons match WinMerge fixture results and save without encoding or newline loss.
 
@@ -502,7 +502,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Continue reducing materialized 1M-row storage after packed rows, compact difference-location hashing, and UInt32 ordered indices; dense, 4 KiB, tab-heavy, and wide-Unicode benchmarks are complete.
+1. Remove duplicate row-text ownership to reduce materialized 1M-row storage further; packed rows, single-word difference locations, UInt32 ordered indices, and dense/4 KiB/tab-heavy/wide-Unicode benchmarks are complete.
 2. Expand xdiff fixture parity through remaining comment syntaxes and moved-block behavior (MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence complete).
 3. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252 mappings; keep unsupported mappings fail-closed.
 4. Convert packaging to an Xcode archive with sandbox entitlements and Developer ID signing.

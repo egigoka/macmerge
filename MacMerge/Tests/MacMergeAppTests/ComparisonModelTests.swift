@@ -25,7 +25,26 @@ final class ComparisonModelTests: XCTestCase {
         }
         XCTAssertNil(locations[DiffRow.ID(leftNumber: 0, rightNumber: 3)])
         XCTAssertNil(locations[DiffRow.ID(leftNumber: 1_000_001, rightNumber: 1_000_000)])
-        XCTAssertLessThanOrEqual(locations.shallowStorageBytes, 24 * 1_024)
+        XCTAssertLessThanOrEqual(locations.shallowStorageBytes, 16 * 1_024)
+
+        let boundaryRows = [
+            DiffRow(
+                left: DiffLine(number: 1_048_576, text: "left"),
+                right: nil,
+                kind: .removed
+            ),
+            DiffRow(
+                left: nil,
+                right: DiffLine(number: 1_048_576, text: "right"),
+                kind: .added
+            ),
+        ]
+        let boundaryLocations = DifferenceLocations(
+            rows: boundaryRows,
+            differenceRowIndices: [0, 1]
+        )
+        XCTAssertEqual(boundaryLocations[boundaryRows[0].id]?.rowIndex, 0)
+        XCTAssertEqual(boundaryLocations[boundaryRows[1].id]?.rowIndex, 1)
     }
 
     func testNewComparisonCreatesTwoEditableUntitledBuffers() async {

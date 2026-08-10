@@ -750,59 +750,58 @@ struct DifferenceLocation: Sendable {
 struct DifferenceLocations: Sendable {
     private static let lineNumberBits = 21
     private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
-    private var keys: [UInt64]
-    private var rowIndices: [UInt32]
+    private static let rowIndexMask = (UInt64(1) << lineNumberBits) - 1
+    private var entries: [UInt64]
 
     init() {
-        keys = []
-        rowIndices = []
+        entries = []
     }
 
     init(rows: [DiffRow], differenceRowIndices: [UInt32]) {
         guard !differenceRowIndices.isEmpty else {
-            keys = []
-            rowIndices = []
+            entries = []
             return
         }
         var capacity = 1
         while capacity < differenceRowIndices.count * 2 { capacity <<= 1 }
-        keys = Array(repeating: 0, count: capacity)
-        rowIndices = Array(repeating: 0, count: capacity)
+        entries = Array(repeating: 0, count: capacity)
         for rowIndex in differenceRowIndices {
             insert(rows[Int(rowIndex)].id, rowIndex: rowIndex)
         }
     }
 
     subscript(id: DiffRow.ID) -> DifferenceLocation? {
-        guard !keys.isEmpty, let key = Self.key(for: id) else { return nil }
-        var slot = Self.hash(key) & (keys.count - 1)
-        for _ in keys.indices {
-            let storedKey = keys[slot]
-            if storedKey == 0 { return nil }
+        guard !entries.isEmpty, let key = Self.key(for: id) else { return nil }
+        var slot = Self.hash(key) & (entries.count - 1)
+        for _ in entries.indices {
+            let entry = entries[slot]
+            if entry == 0 { return nil }
+            let storedKey = entry & ((UInt64(1) << (Self.lineNumberBits * 2)) - 1)
             if storedKey == key {
-                return DifferenceLocation(rowIndex: Int(rowIndices[slot]))
+                return DifferenceLocation(
+                    rowIndex: Int((entry >> (Self.lineNumberBits * 2)) & Self.rowIndexMask)
+                )
             }
-            slot = (slot + 1) & (keys.count - 1)
+            slot = (slot + 1) & (entries.count - 1)
         }
         return nil
     }
 
     var shallowStorageBytes: Int {
-        keys.count * MemoryLayout<UInt64>.stride +
-            rowIndices.count * MemoryLayout<UInt32>.stride
+        entries.count * MemoryLayout<UInt64>.stride
     }
 
     private mutating func insert(_ id: DiffRow.ID, rowIndex: UInt32) {
-        guard let key = Self.key(for: id) else {
+        guard let key = Self.key(for: id), UInt64(rowIndex) <= Self.rowIndexMask else {
             preconditionFailure("Difference location exceeds comparison limits")
         }
-        var slot = Self.hash(key) & (keys.count - 1)
-        while keys[slot] != 0 {
-            precondition(keys[slot] != key, "Duplicate difference row ID")
-            slot = (slot + 1) & (keys.count - 1)
+        var slot = Self.hash(key) & (entries.count - 1)
+        let keyMask = (UInt64(1) << (Self.lineNumberBits * 2)) - 1
+        while entries[slot] != 0 {
+            precondition(entries[slot] & keyMask != key, "Duplicate difference row ID")
+            slot = (slot + 1) & (entries.count - 1)
         }
-        keys[slot] = key
-        rowIndices[slot] = rowIndex
+        entries[slot] = key | (UInt64(rowIndex) << (Self.lineNumberBits * 2))
     }
 
     private static func key(for id: DiffRow.ID) -> UInt64? {
