@@ -14,6 +14,8 @@ template=${TRACE_TEMPLATE:-"Time Profiler"}
 time_limit=${TRACE_TIME_LIMIT:-20s}
 line_count=${LINE_COUNT:-1000000}
 density=${FIXTURE_DENSITY:-sparse}
+content=${FIXTURE_CONTENT:-ascii}
+line_bytes=${FIXTURE_LINE_BYTES:-}
 app="$package_root/dist/MacMerge.app"
 app_executable="$app/Contents/MacOS/MacMerge"
 trace_pid=""
@@ -87,13 +89,20 @@ if [[ -e "$trace" ]]; then
     exit 1
 fi
 rm -f "$report"
+benchmark_arguments=(
+    --lines "$line_count"
+    --density "$density"
+    --content "$content"
+    --fixture-directory "$fixture_dir"
+)
+if [[ -n "$line_bytes" ]]; then
+    benchmark_arguments+=(--line-bytes "$line_bytes")
+fi
 swift run \
     --package-path "$package_root" \
     --configuration release \
     MacMergeBenchmark \
-    --lines "$line_count" \
-    --density "$density" \
-    --fixture-directory "$fixture_dir" >/dev/null
+    "${benchmark_arguments[@]}" >/dev/null
 
 left="$fixture_dir/macmerge-$line_count-left.txt"
 right="$fixture_dir/macmerge-$line_count-right.txt"

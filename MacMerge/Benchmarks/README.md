@@ -22,6 +22,8 @@ Exercise long lines by setting their minimum UTF-8 payload size:
 swift run -c release MacMergeBenchmark --lines 10000 --line-bytes 4096
 ```
 
+Exercise tab expansion and wide-Unicode display columns with `--content tabs` or `--content wide-unicode`. Packaged harnesses accept the same options through `FIXTURE_CONTENT` and `FIXTURE_LINE_BYTES`.
+
 Generate the same file pairs for packaged-app scrolling and Instruments runs:
 
 ```sh

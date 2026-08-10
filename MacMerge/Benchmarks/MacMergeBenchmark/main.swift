@@ -11,10 +11,17 @@ private struct Configuration {
         case dense
     }
 
+    enum Content: String {
+        case ascii
+        case tabs
+        case wideUnicode = "wide-unicode"
+    }
+
     var lineCounts = [10_000, 100_000, 250_000, 1_000_000]
     var iterations = 1
     var fixtureDirectory: URL?
     var density = Density.sparse
+    var content = Content.ascii
     var lineBytes: Int?
 
     init(arguments: ArraySlice<String>) throws {
@@ -55,6 +62,12 @@ private struct Configuration {
                     throw ArgumentError.invalidValue(argument, index < arguments.endIndex ? arguments[index] : "")
                 }
                 lineBytes = value
+            case "--content":
+                index = arguments.index(after: index)
+                guard index < arguments.endIndex, let value = Content(rawValue: arguments[index]) else {
+                    throw ArgumentError.invalidValue(argument, index < arguments.endIndex ? arguments[index] : "")
+                }
+                content = value
             case "--help", "-h":
                 printUsage()
                 exit(EXIT_SUCCESS)
@@ -87,6 +100,7 @@ private struct Fixture {
 }
 
 private struct Result {
+    let content: Configuration.Content
     let lines: Int
     let minimumLineBytes: Int?
     let inputBytes: Int
@@ -97,13 +111,38 @@ private struct Result {
     let residentDeltaBytes: Int64
 }
 
-private func fixtureLine(_ prefix: String, minimumBytes: Int?) -> String {
-    prefix + String(repeating: "x", count: max(0, (minimumBytes ?? 0) - prefix.utf8.count))
+private func fixtureLine(
+    _ prefix: String,
+    minimumBytes: Int?,
+    content: Configuration.Content
+) -> String {
+    let unit = switch content {
+    case .ascii: "x"
+    case .tabs: "\tcolumn"
+    case .wideUnicode: "界"
+    }
+    let minimumBytes = minimumBytes ?? (content == .ascii ? prefix.utf8.count : prefix.utf8.count + unit.utf8.count)
+    let missingBytes = max(0, minimumBytes - prefix.utf8.count)
+    let minimumUnitCount = content == .ascii ? 0 : 1
+    let unitCount = max(
+        minimumUnitCount,
+        (missingBytes + unit.utf8.count - 1) / unit.utf8.count
+    )
+    return prefix + String(repeating: unit, count: unitCount)
+}
+
+private func contentUnitBytes(_ content: Configuration.Content) -> Int {
+    switch content {
+    case .ascii: 1
+    case .tabs: "\tcolumn".utf8.count
+    case .wideUnicode: "界".utf8.count
+    }
 }
 
 private func fixture(
     lineCount: Int,
     density: Configuration.Density,
+    content: Configuration.Content,
     lineBytes: Int?
 ) -> Fixture {
     var left = ""
@@ -115,10 +154,10 @@ private func fixture(
     var differences = 0
 
     for line in 0..<lineCount {
-        let common = fixtureLine("line-\(line)", minimumBytes: lineBytes)
+        let common = fixtureLine("line-\(line)", minimumBytes: lineBytes, content: content)
         left += common
         if line % changeStride == changeStride / 2 {
-            right += fixtureLine("changed-\(line)", minimumBytes: lineBytes)
+            right += fixtureLine("changed-\(line)", minimumBytes: lineBytes, content: content)
             differences += 1
         } else {
             right += common
@@ -137,17 +176,35 @@ private func benchmark(
     iterations: Int,
     fixtureDirectory: URL?,
     density: Configuration.Density,
+    content: Configuration.Content,
     lineBytes: Int?
 ) throws -> Result {
     guard lineCount <= maximumLineCount else { throw BenchmarkError.fixtureTooLarge }
     let longestPrefixBytes = "changed-\(lineCount - 1)".utf8.count
-    let effectiveLineBytes = max(lineBytes ?? 0, longestPrefixBytes)
+    let unitBytes = contentUnitBytes(content)
+    let effectiveLineBytes: Int
+    if let lineBytes {
+        let (paddedLineBytes, overflowed) = lineBytes.addingReportingOverflow(unitBytes - 1)
+        guard !overflowed else { throw BenchmarkError.fixtureTooLarge }
+        let (contentLineBytes, contentOverflowed) = longestPrefixBytes.addingReportingOverflow(
+            content == .ascii ? 0 : unitBytes
+        )
+        guard !contentOverflowed else { throw BenchmarkError.fixtureTooLarge }
+        effectiveLineBytes = max(contentLineBytes, paddedLineBytes)
+    } else {
+        effectiveLineBytes = longestPrefixBytes + (content == .ascii ? 0 : unitBytes)
+    }
     let (contentBytes, overflowed) = lineCount.multipliedReportingOverflow(by: effectiveLineBytes)
     guard !overflowed,
           contentBytes <= maximumInputBytes - max(0, lineCount - 1) else {
         throw BenchmarkError.fixtureTooLarge
     }
-    let input = fixture(lineCount: lineCount, density: density, lineBytes: lineBytes)
+    let input = fixture(
+        lineCount: lineCount,
+        density: density,
+        content: content,
+        lineBytes: lineBytes
+    )
     if let fixtureDirectory {
         try write(input, lineCount: lineCount, to: fixtureDirectory)
     }
@@ -179,8 +236,22 @@ private func benchmark(
           finalRows.last?.right?.number == lineCount else {
         throw BenchmarkError.invalidAlignment
     }
+    let firstText = finalRows.first?.left?.text ?? ""
+    switch content {
+    case .ascii:
+        break
+    case .tabs:
+        guard firstText.contains("\t") else {
+            throw BenchmarkError.semanticCheckFailed("tab fixture content")
+        }
+    case .wideUnicode:
+        guard firstText.contains("界") else {
+            throw BenchmarkError.semanticCheckFailed("wide-Unicode fixture content")
+        }
+    }
 
     return Result(
+        content: content,
         lines: lineCount,
         minimumLineBytes: lineBytes,
         inputBytes: input.left.utf8.count + input.right.utf8.count,
@@ -700,7 +771,7 @@ private func printUsage() {
     print("""
     Usage: MacMergeBenchmark [--lines 10000,100000,250000,1000000] [--iterations 1]
                              [--fixture-directory PATH] [--density sparse|dense]
-                             [--line-bytes COUNT]
+                             [--content ascii|tabs|wide-unicode] [--line-bytes COUNT]
 
     Runs deterministic text comparisons and reports best elapsed time,
     throughput, shallow DiffRow storage, and resident-memory growth.
@@ -714,17 +785,19 @@ private func mebibytes(_ bytes: Int64) -> String {
 do {
     let configuration = try Configuration(arguments: CommandLine.arguments.dropFirst())
     try validateComparisonSemantics()
-    print("density,lines,minimum_line_bytes,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
+    print("density,content,lines,minimum_line_bytes,input_mib,rows,differences,seconds,rows_per_second,row_storage_mib,resident_delta_mib")
     for lineCount in configuration.lineCounts {
         let result = try benchmark(
             lineCount: lineCount,
             iterations: configuration.iterations,
             fixtureDirectory: configuration.fixtureDirectory,
             density: configuration.density,
+            content: configuration.content,
             lineBytes: configuration.lineBytes
         )
         print([
             configuration.density.rawValue,
+            result.content.rawValue,
             String(result.lines),
             result.minimumLineBytes.map(String.init) ?? "variable",
             mebibytes(Int64(result.inputBytes)),

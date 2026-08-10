@@ -48,6 +48,11 @@ jobs:
       - name: Benchmark long-line text comparisons
         run: swift run -c release MacMergeBenchmark --lines 10000 --line-bytes 4096 > benchmark-long-lines.csv
 
+      - name: Benchmark tab and wide-Unicode comparisons
+        run: |
+          swift run -c release MacMergeBenchmark --lines 100000 --content tabs --line-bytes 128 > benchmark-tabs.csv
+          swift run -c release MacMergeBenchmark --lines 100000 --content wide-unicode --line-bytes 128 > benchmark-wide-unicode.csv
+
       - name: Package application
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -56,6 +61,24 @@ jobs:
       - name: Enforce packaged-app performance budgets
         env:
           SKIP_PACKAGE: 1
+        run: Scripts/run-performance-budgets.sh
+
+      - name: Enforce packaged tab performance budgets
+        env:
+          SKIP_PACKAGE: 1
+          LINE_COUNT: 100000
+          FIXTURE_CONTENT: tabs
+          FIXTURE_LINE_BYTES: 128
+          REPORT_PATH: ${{ github.workspace }}/MacMerge/dist/performance-tabs-report.json
+        run: Scripts/run-performance-budgets.sh
+
+      - name: Enforce packaged wide-Unicode performance budgets
+        env:
+          SKIP_PACKAGE: 1
+          LINE_COUNT: 100000
+          FIXTURE_CONTENT: wide-unicode
+          FIXTURE_LINE_BYTES: 128
+          REPORT_PATH: ${{ github.workspace }}/MacMerge/dist/performance-wide-unicode-report.json
         run: Scripts/run-performance-budgets.sh
 
       - name: Capture packaged-app performance trace
@@ -86,7 +109,11 @@ jobs:
             MacMerge/benchmark.csv
             MacMerge/benchmark-dense.csv
             MacMerge/benchmark-long-lines.csv
+            MacMerge/benchmark-tabs.csv
+            MacMerge/benchmark-wide-unicode.csv
             MacMerge/dist/performance-report.json
+            MacMerge/dist/performance-tabs-report.json
+            MacMerge/dist/performance-wide-unicode-report.json
             MacMerge/dist/MacMerge-performance.trace
             MacMerge/dist/performance-trace-report.json
           if-no-files-found: error

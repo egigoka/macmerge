@@ -738,13 +738,91 @@ struct ComparedFile: Equatable, Sendable {
 private struct ComparisonRenderResult: Sendable {
     let rows: [DiffRow]
     let maximumLineColumns: Int
-    let differenceLocations: [DiffRow.ID: DifferenceLocation]
+    let differenceLocations: DifferenceLocations
     let differenceRowIndices: [Int]
     let summary: DiffSummary
 }
 
 struct DifferenceLocation: Sendable {
     let rowIndex: Int
+}
+
+struct DifferenceLocations: Sendable {
+    private static let lineNumberBits = 21
+    private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
+    private var keys: [UInt64]
+    private var rowIndices: [UInt32]
+
+    init() {
+        keys = []
+        rowIndices = []
+    }
+
+    init(rows: [DiffRow], differenceRowIndices: [Int]) {
+        guard !differenceRowIndices.isEmpty else {
+            keys = []
+            rowIndices = []
+            return
+        }
+        var capacity = 1
+        while capacity < differenceRowIndices.count * 2 { capacity <<= 1 }
+        keys = Array(repeating: 0, count: capacity)
+        rowIndices = Array(repeating: 0, count: capacity)
+        for rowIndex in differenceRowIndices {
+            insert(rows[rowIndex].id, rowIndex: rowIndex)
+        }
+    }
+
+    subscript(id: DiffRow.ID) -> DifferenceLocation? {
+        guard !keys.isEmpty, let key = Self.key(for: id) else { return nil }
+        var slot = Self.hash(key) & (keys.count - 1)
+        for _ in keys.indices {
+            let storedKey = keys[slot]
+            if storedKey == 0 { return nil }
+            if storedKey == key {
+                return DifferenceLocation(rowIndex: Int(rowIndices[slot]))
+            }
+            slot = (slot + 1) & (keys.count - 1)
+        }
+        return nil
+    }
+
+    var shallowStorageBytes: Int {
+        keys.count * MemoryLayout<UInt64>.stride +
+            rowIndices.count * MemoryLayout<UInt32>.stride
+    }
+
+    private mutating func insert(_ id: DiffRow.ID, rowIndex: Int) {
+        guard let key = Self.key(for: id), let rowIndex = UInt32(exactly: rowIndex) else {
+            preconditionFailure("Difference location exceeds comparison limits")
+        }
+        var slot = Self.hash(key) & (keys.count - 1)
+        while keys[slot] != 0 {
+            precondition(keys[slot] != key, "Duplicate difference row ID")
+            slot = (slot + 1) & (keys.count - 1)
+        }
+        keys[slot] = key
+        rowIndices[slot] = rowIndex
+    }
+
+    private static func key(for id: DiffRow.ID) -> UInt64? {
+        let left = id.leftNumber ?? 0
+        let right = id.rightNumber ?? 0
+        guard id.leftNumber.map({ (1...Int(lineNumberMask)).contains($0) }) ?? true,
+              id.rightNumber.map({ (1...Int(lineNumberMask)).contains($0) }) ?? true else { return nil }
+        let key = UInt64(left) | (UInt64(right) << lineNumberBits)
+        return key == 0 ? nil : key
+    }
+
+    private static func hash(_ key: UInt64) -> Int {
+        var value = key
+        value ^= value >> 30
+        value &*= 0xBF58_476D_1CE4_E5B9
+        value ^= value >> 27
+        value &*= 0x94D0_49BB_1331_11EB
+        value ^= value >> 31
+        return Int(truncatingIfNeeded: value)
+    }
 }
 
 private actor ComparisonWorker {
@@ -765,9 +843,7 @@ private func computeComparison(
 ) throws -> ComparisonRenderResult {
     let rows = try LineDiff.compare(left: left, right: right, options: options)
     var maximumLineColumns = 0
-    var differenceLocations: [DiffRow.ID: DifferenceLocation] = [:]
     var differenceRowIndices: [Int] = []
-    differenceLocations.reserveCapacity(rows.count / 4)
     for (index, row) in rows.enumerated() {
         maximumLineColumns = max(
             maximumLineColumns,
@@ -775,10 +851,13 @@ private func computeComparison(
             row.right.map { displayColumnCount($0.text) } ?? 0
         )
         if row.kind != .unchanged {
-            differenceLocations[row.id] = DifferenceLocation(rowIndex: index)
             differenceRowIndices.append(index)
         }
     }
+    let differenceLocations = DifferenceLocations(
+        rows: rows,
+        differenceRowIndices: differenceRowIndices
+    )
     return ComparisonRenderResult(
         rows: rows,
         maximumLineColumns: maximumLineColumns,
@@ -863,7 +942,7 @@ final class ComparisonModel {
         didSet { rowsRevision &+= 1 }
     }
     private(set) var maximumLineColumns = 0
-    private(set) var differenceLocations: [DiffRow.ID: DifferenceLocation] = [:]
+    private(set) var differenceLocations = DifferenceLocations()
     private(set) var differenceRowIndices: [Int] = []
     private(set) var summary = DiffSummary(rows: [])
     private(set) var selectedDifferenceID: DiffRow.ID?
@@ -976,7 +1055,7 @@ final class ComparisonModel {
         right = .scratchpad(named: "Untitled Right")
         rows = []
         maximumLineColumns = 0
-        differenceLocations = [:]
+        differenceLocations = DifferenceLocations()
         differenceRowIndices = []
         summary = DiffSummary(rows: [])
         selectedDifferenceID = nil
@@ -1679,7 +1758,7 @@ final class ComparisonModel {
         guard isReady else {
             rows = []
             maximumLineColumns = 0
-            differenceLocations = [:]
+            differenceLocations = DifferenceLocations()
             differenceRowIndices = []
             summary = DiffSummary(rows: [])
             comparisonFailed = false
@@ -1716,7 +1795,7 @@ final class ComparisonModel {
                 if generation == diffGeneration {
                     rows = []
                     maximumLineColumns = 0
-                    differenceLocations = [:]
+                    differenceLocations = DifferenceLocations()
                     differenceRowIndices = []
                     summary = DiffSummary(rows: [])
                     comparisonFailed = true
@@ -1771,7 +1850,7 @@ final class ComparisonModel {
                 guard generation == diffGeneration else { return }
                 rows = []
                 maximumLineColumns = 0
-                differenceLocations = [:]
+                differenceLocations = DifferenceLocations()
                 differenceRowIndices = []
                 summary = DiffSummary(rows: [])
                 comparisonFailed = true
@@ -2822,7 +2901,7 @@ private struct DiffCanvas: View {
     let rows: [DiffRow]
     let rowsRevision: Int
     let maximumLineColumns: Int
-    let differenceLocations: [DiffRow.ID: DifferenceLocation]
+    let differenceLocations: DifferenceLocations
     let selectedDifferenceID: DiffRow.ID?
     let selectedDifferenceRevealRevision: Int
     let lineDifferenceSelectionRevision: Int
@@ -2869,7 +2948,7 @@ private struct DiffTableView: NSViewRepresentable {
     let rows: [DiffRow]
     let rowsRevision: Int
     let maximumLineColumns: Int
-    let differenceLocations: [DiffRow.ID: DifferenceLocation]
+    let differenceLocations: DifferenceLocations
     let selectedDifferenceID: DiffRow.ID?
     let selectedDifferenceRevealRevision: Int
     let lineDifferenceSelectionRevision: Int
@@ -3012,7 +3091,7 @@ private struct DiffTableView: NSViewRepresentable {
         private static let editableRow = DiffRow(left: nil, right: nil, kind: .unchanged)
         var rows: [DiffRow]
         var rowsRevision: Int
-        var differenceLocations: [DiffRow.ID: DifferenceLocation]
+        var differenceLocations: DifferenceLocations
         var selectedDifferenceID: DiffRow.ID?
         var selectedDifferenceRevealRevision: Int
         var lineDifferenceSelectionRevision: Int
@@ -3043,7 +3122,7 @@ private struct DiffTableView: NSViewRepresentable {
         init(
             rows: [DiffRow],
             rowsRevision: Int,
-            differenceLocations: [DiffRow.ID: DifferenceLocation],
+            differenceLocations: DifferenceLocations,
             selectedDifferenceRevealRevision: Int,
             lineDifferenceSelectionRevision: Int,
             paneFocusRevision: Int,
@@ -3177,7 +3256,7 @@ private struct DiffTableView: NSViewRepresentable {
         func setRows(
             _ rows: [DiffRow],
             revision: Int,
-            differenceLocations: [DiffRow.ID: DifferenceLocation]
+            differenceLocations: DifferenceLocations
         ) {
             self.rows = rows
             rowsRevision = revision

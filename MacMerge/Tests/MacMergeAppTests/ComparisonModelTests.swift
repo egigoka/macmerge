@@ -5,6 +5,29 @@ import XCTest
 
 @MainActor
 final class ComparisonModelTests: XCTestCase {
+    func testDifferenceLocationsUseCompactCollisionSafeStorage() {
+        let rows = (1...1_000).map { number in
+            let omitsLeft = number.isMultiple(of: 3)
+            return DiffRow(
+                left: omitsLeft ? nil : DiffLine(number: number, text: "left"),
+                right: !omitsLeft && number.isMultiple(of: 5)
+                    ? nil
+                    : DiffLine(number: number, text: "right"),
+                kind: .modified
+            )
+        }
+        let rowIndices = Array(rows.indices)
+
+        let locations = DifferenceLocations(rows: rows, differenceRowIndices: rowIndices)
+
+        for index in rows.indices {
+            XCTAssertEqual(locations[rows[index].id]?.rowIndex, index)
+        }
+        XCTAssertNil(locations[DiffRow.ID(leftNumber: 0, rightNumber: 3)])
+        XCTAssertNil(locations[DiffRow.ID(leftNumber: 1_000_001, rightNumber: 1_000_000)])
+        XCTAssertLessThanOrEqual(locations.shallowStorageBytes, 24 * 1_024)
+    }
+
     func testNewComparisonCreatesTwoEditableUntitledBuffers() async {
         let model = ComparisonModel()
 

@@ -8,6 +8,8 @@ report=${REPORT_PATH:-"$package_root/dist/performance-report.json"}
 app="$package_root/dist/MacMerge.app"
 line_count=${LINE_COUNT:-1000000}
 density=${FIXTURE_DENSITY:-sparse}
+content=${FIXTURE_CONTENT:-ascii}
+line_bytes=${FIXTURE_LINE_BYTES:-}
 load_budget_ms=${LOAD_BUDGET_MS:-5000}
 comparison_budget_ms=${COMPARISON_BUDGET_MS:-5000}
 first_render_budget_ms=${FIRST_RENDER_BUDGET_MS:-1500}
@@ -36,13 +38,20 @@ fi
 
 mkdir -p "$fixture_dir" "$(dirname "$report")"
 rm -f "$report"
+benchmark_arguments=(
+    --lines "$line_count"
+    --density "$density"
+    --content "$content"
+    --fixture-directory "$fixture_dir"
+)
+if [[ -n "$line_bytes" ]]; then
+    benchmark_arguments+=(--line-bytes "$line_bytes")
+fi
 swift run \
     --package-path "$package_root" \
     --configuration release \
     MacMergeBenchmark \
-    --lines "$line_count" \
-    --density "$density" \
-    --fixture-directory "$fixture_dir" >/dev/null
+    "${benchmark_arguments[@]}" >/dev/null
 
 left="$fixture_dir/macmerge-$line_count-left.txt"
 right="$fixture_dir/macmerge-$line_count-right.txt"
