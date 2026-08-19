@@ -9,6 +9,7 @@ private struct Configuration {
     enum Density: String {
         case sparse
         case dense
+        case locationDense = "location-dense"
     }
 
     enum Content: String {
@@ -150,7 +151,11 @@ private func fixture(
     let estimatedBytes = min(maximumInputBytes, lineCount * (max(16, lineBytes ?? 0) + 1))
     left.reserveCapacity(estimatedBytes)
     right.reserveCapacity(estimatedBytes)
-    let changeStride = density == .dense ? 1 : max(1, lineCount / 10)
+    let changeStride = switch density {
+    case .sparse: max(1, lineCount / 10)
+    case .dense: 1
+    case .locationDense: 2
+    }
     var differences = 0
 
     for line in 0..<lineCount {
@@ -783,7 +788,7 @@ private func residentMemoryBytes() -> UInt64 {
 private func printUsage() {
     print("""
     Usage: MacMergeBenchmark [--lines 10000,100000,250000,1000000] [--iterations 1]
-                             [--fixture-directory PATH] [--density sparse|dense]
+                             [--fixture-directory PATH] [--density sparse|dense|location-dense]
                              [--content ascii|tabs|wide-unicode] [--line-bytes COUNT]
 
     Runs deterministic text comparisons and reports best elapsed time,

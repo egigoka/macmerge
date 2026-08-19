@@ -36,6 +36,18 @@ typedef struct mmx_diff_result {
     size_t count;
 } mmx_diff_result;
 
+typedef struct mmx_moved_line {
+    int32_t left_line;
+    int32_t right_line;
+} mmx_moved_line;
+
+typedef struct mmx_moved_result {
+    mmx_moved_line *left_to_right;
+    size_t left_to_right_count;
+    mmx_moved_line *right_to_left;
+    size_t right_to_left_count;
+} mmx_moved_result;
+
 typedef struct mmx_bytes_result {
     uint8_t *bytes;
     size_t size;
@@ -50,7 +62,19 @@ int32_t mmx_diff(
     mmx_diff_result *result
 );
 
+int32_t mmx_diff_with_moves(
+    const void *left,
+    size_t left_size,
+    const void *right,
+    size_t right_size,
+    uint64_t flags,
+    mmx_diff_result *result,
+    mmx_moved_result *moved
+);
+
+/* Result structs must be zero-initialized before either diff call. */
 void mmx_diff_result_free(mmx_diff_result *result);
+void mmx_moved_result_free(mmx_moved_result *result);
 
 int32_t mmx_regex_substitute(
     const void *subject,
@@ -64,6 +88,21 @@ int32_t mmx_regex_substitute(
     mmx_bytes_result *result
 );
 
+int32_t mmx_line_filter_create(
+    const void *pattern,
+    size_t pattern_size,
+    int32_t case_sensitive,
+    void **filter
+);
+
+int32_t mmx_line_filter_matches(
+    const void *filter,
+    const void *subject,
+    size_t subject_size,
+    int32_t *matches
+);
+
+void mmx_line_filter_free(void *filter);
 void mmx_bytes_result_free(mmx_bytes_result *result);
 
 #if defined(DEBUG)

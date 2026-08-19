@@ -1,0 +1,20 @@
+{
+  "elements": [
+    {
+      "enabled": true,
+      "label": "Left file location map",
+      "role": "AXSlider"
+    },
+    {
+      "enabled": true,
+      "label": "Right file location map",
+      "role": "AXSlider"
+    }
+  ],
+  "window": {
+    "height": 720,
+    "identifier": "comparison",
+    "role": "AXWindow",
+    "width": 841
+  }
+}

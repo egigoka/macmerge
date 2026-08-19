@@ -7,6 +7,11 @@ public struct ComparisonSnapshot: Equatable, Sendable {
         self.right = right
     }
 
+    public static func == (lhs: ComparisonSnapshot, rhs: ComparisonSnapshot) -> Bool {
+        lhs.left.utf8.elementsEqual(rhs.left.utf8)
+            && lhs.right.utf8.elementsEqual(rhs.right.utf8)
+    }
+
     fileprivate var byteCount: Int {
         let (total, overflow) = left.utf8.count.addingReportingOverflow(right.utf8.count)
         return overflow ? .max : total
@@ -21,7 +26,7 @@ public struct ComparisonHistory: Sendable {
     private var undoStack: [ComparisonSnapshot] = []
     private var redoStack: [ComparisonSnapshot] = []
 
-    public var canUndo: Bool { !undoStack.isEmpty }
+    public var canUndo: Bool { undoStack.last(where: { $0 != current }) != nil }
     public var canRedo: Bool { !redoStack.isEmpty }
 
     public init(
@@ -57,12 +62,13 @@ public struct ComparisonHistory: Sendable {
     }
 
     public mutating func discardRedundantUndo() {
-        if undoStack.last == current {
+        while undoStack.last == current {
             undoStack.removeLast()
         }
     }
 
     public mutating func undo() -> ComparisonSnapshot? {
+        discardRedundantUndo()
         guard let snapshot = undoStack.popLast() else { return nil }
         redoStack.append(current)
         current = snapshot

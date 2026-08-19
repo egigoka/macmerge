@@ -1,7 +1,7 @@
 import CXDiff
 import Foundation
 
-public enum DiffKind: Equatable, Sendable {
+public enum DiffKind: Hashable, Sendable {
     case unchanged
     case modified
     case removed
@@ -172,6 +172,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
     public var ignoreComments: Bool
     public var ignoreLineEndings: Bool
     public var indentHeuristic: Bool
+    public var detectMovedBlocks: Bool
     public var lineFiltersEnabled: Bool
     public var lineFilters: [LineFilterRule]
     public var substitutionsEnabled: Bool
@@ -187,6 +188,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
         ignoreComments: Bool = false,
         ignoreLineEndings: Bool = true,
         indentHeuristic: Bool = false,
+        detectMovedBlocks: Bool = false,
         lineFiltersEnabled: Bool = true,
         lineFilters: [LineFilterRule] = [],
         substitutionsEnabled: Bool = true,
@@ -201,6 +203,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
         self.ignoreComments = ignoreComments
         self.ignoreLineEndings = ignoreLineEndings
         self.indentHeuristic = indentHeuristic
+        self.detectMovedBlocks = detectMovedBlocks
         self.lineFiltersEnabled = lineFiltersEnabled
         self.lineFilters = lineFilters
         self.substitutionsEnabled = substitutionsEnabled
@@ -217,6 +220,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
         case ignoreComments
         case ignoreLineEndings
         case indentHeuristic
+        case detectMovedBlocks
         case lineFiltersEnabled
         case lineFilters
         case substitutionsEnabled
@@ -233,6 +237,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
         ignoreComments = try container.decodeIfPresent(Bool.self, forKey: .ignoreComments) ?? false
         ignoreLineEndings = try container.decodeIfPresent(Bool.self, forKey: .ignoreLineEndings) ?? true
         indentHeuristic = try container.decodeIfPresent(Bool.self, forKey: .indentHeuristic) ?? false
+        detectMovedBlocks = try container.decodeIfPresent(Bool.self, forKey: .detectMovedBlocks) ?? false
         lineFiltersEnabled = try container.decodeIfPresent(Bool.self, forKey: .lineFiltersEnabled) ?? true
         lineFilters = try container.decodeIfPresent([LineFilterRule].self, forKey: .lineFilters) ?? []
         substitutionsEnabled = try container.decodeIfPresent(Bool.self, forKey: .substitutionsEnabled) ?? true
@@ -250,6 +255,7 @@ public struct LineDiffOptions: Codable, Equatable, Sendable {
         try container.encode(ignoreComments, forKey: .ignoreComments)
         try container.encode(ignoreLineEndings, forKey: .ignoreLineEndings)
         try container.encode(indentHeuristic, forKey: .indentHeuristic)
+        try container.encode(detectMovedBlocks, forKey: .detectMovedBlocks)
         try container.encode(lineFiltersEnabled, forKey: .lineFiltersEnabled)
         try container.encode(lineFilters, forKey: .lineFilters)
         try container.encode(substitutionsEnabled, forKey: .substitutionsEnabled)
@@ -262,6 +268,7 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
     case inputTooLarge(maximumBytes: Int)
     case tooManyLines(maximumLines: Int)
     case invalidRegularExpression(String)
+    case lineFilterEngineFailure(Int32)
     case filterChangedLineStructure
     case rawBytePlaceholderUnavailable
     case substitutionEngineFailure(Int32)
@@ -277,6 +284,8 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
             "Text comparison is limited to \(maximumLines.formatted()) lines per file."
         case let .invalidRegularExpression(pattern):
             "Invalid comparison filter regular expression: \(pattern)"
+        case let .lineFilterEngineFailure(code):
+            "WinMerge line filter engine failed with code \(code)."
         case .filterChangedLineStructure:
             "A substitution inserted a line ending. Comparison substitutions must preserve line structure."
         case .rawBytePlaceholderUnavailable:
@@ -289,7 +298,7 @@ public enum LineDiffError: Error, LocalizedError, Equatable, Sendable {
     }
 }
 
-public struct DiffLine: Equatable, Sendable {
+public struct DiffLine: Hashable, Sendable {
     public let number: Int
     public let text: String
 
@@ -333,6 +342,27 @@ fileprivate final class DiffRowTextSource: @unchecked Sendable {
     func content(at index: Int) -> String {
         let range = unpackedRange(at: index)
         return String(decoding: bytes[range], as: UTF8.self)
+    }
+
+    func contentUTF8Count(at index: Int) -> Int {
+        unpackedRange(at: index).count
+    }
+
+    func contentUTF8(at index: Int) -> ArraySlice<UInt8> {
+        bytes[unpackedRange(at: index)]
+    }
+
+    func record(at index: Int, equals other: DiffRowTextSource, at otherIndex: Int) -> Bool {
+        guard ranges.indices.contains(index), other.ranges.indices.contains(otherIndex) else {
+            return false
+        }
+        return bytes[recordRange(at: index)].elementsEqual(other.bytes[other.recordRange(at: otherIndex)])
+    }
+
+    private func recordRange(at index: Int) -> Range<Int> {
+        let contentRange = unpackedRange(at: index)
+        let end = index + 1 < ranges.count ? unpackedRange(at: index + 1).lowerBound : bytes.count
+        return contentRange.lowerBound..<end
     }
 
     private func unpackedRange(at index: Int) -> Range<Int> {
@@ -380,13 +410,33 @@ fileprivate final class DiffRowTextStorage: @unchecked Sendable {
             source.content(at: lineNumber - 1)
         }
     }
+
+    func sourceTextUTF8Count(from source: DiffRowText, lineNumber: Int) -> Int? {
+        guard lineNumber != 0, case let .source(source) = source else { return nil }
+        return source.contentUTF8Count(at: lineNumber - 1)
+    }
+
+    func sourceTextUTF8(from source: DiffRowText, lineNumber: Int) -> ArraySlice<UInt8>? {
+        guard lineNumber != 0, case let .source(source) = source else { return nil }
+        return source.contentUTF8(at: lineNumber - 1)
+    }
+
+    func sourceRecordsEqual(leftNumber: Int?, rightNumber: Int?) -> Bool {
+        guard let leftNumber, let rightNumber, leftNumber > 0, rightNumber > 0,
+              case .source(let leftSource) = left,
+              case .source(let rightSource) = right else {
+            return false
+        }
+        return leftSource.record(at: leftNumber - 1, equals: rightSource, at: rightNumber - 1)
+    }
 }
 
-public struct DiffRow: Identifiable, Equatable, Sendable {
+public struct DiffRow: Identifiable, Hashable, Sendable {
     private static let lineNumberBits = 30
     private static let lineNumberMask = (UInt64(1) << lineNumberBits) - 1
     private static let encodedLineNumber = Int(lineNumberMask)
     private static let sharesTextBit = UInt64(1) << 62
+    private static let equalSourceRecordsBit = UInt64(1) << 63
 
     public struct ID: Hashable, Sendable {
         public let leftNumber: Int?
@@ -417,6 +467,45 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
 
     var sharesTextStorage: Bool { metadata & Self.sharesTextBit != 0 }
     var usesSourceTextStorage: Bool { storage.isSourceBacked }
+    func sourceTextUTF8Count(onLeft: Bool) -> Int? {
+        if onLeft {
+            return storage.sourceTextUTF8Count(
+                from: storage.left,
+                lineNumber: storedLeftNumber
+            )
+        }
+        if metadata & Self.sharesTextBit != 0 {
+            return storage.sourceTextUTF8Count(
+                from: storage.left,
+                lineNumber: storedLeftNumber
+            )
+        }
+        return storage.sourceTextUTF8Count(
+            from: storage.right,
+            lineNumber: storedRightNumber
+        )
+    }
+
+    func sourceTextUTF8(onLeft: Bool) -> ArraySlice<UInt8>? {
+        if onLeft {
+            return storage.sourceTextUTF8(
+                from: storage.left,
+                lineNumber: storedLeftNumber
+            )
+        }
+        if metadata & Self.sharesTextBit != 0 {
+            return storage.sourceTextUTF8(
+                from: storage.left,
+                lineNumber: storedLeftNumber
+            )
+        }
+        return storage.sourceTextUTF8(
+            from: storage.right,
+            lineNumber: storedRightNumber
+        )
+    }
+    /// Whether both original line records, including their terminators, are byte-identical.
+    public var hasEqualSourceRecords: Bool { metadata & Self.equalSourceRecordsBit != 0 }
 
     public var left: DiffLine? {
         Self.line(
@@ -452,12 +541,27 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
     }
 
     public static func == (lhs: DiffRow, rhs: DiffRow) -> Bool {
-        lhs.left == rhs.left && lhs.right == rhs.right && lhs.kind == rhs.kind
+        lhs.left == rhs.left &&
+            lhs.right == rhs.right &&
+            lhs.kind == rhs.kind &&
+            lhs.hasEqualSourceRecords == rhs.hasEqualSourceRecords
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(left)
+        hasher.combine(right)
+        hasher.combine(kind)
+        hasher.combine(hasEqualSourceRecords)
     }
 
     public init(left: DiffLine?, right: DiffLine?, kind: DiffKind) {
         let storedLeft = Self.store(left)
         let storedRight = Self.store(right)
+        let hasEqualSourceRecords = if let left, let right {
+            left.text.utf8.elementsEqual(right.text.utf8)
+        } else {
+            false
+        }
         let sharesText = if case let .owned(leftText) = storedLeft.text,
                             case let .owned(rightText) = storedRight.text {
             storedLeft.number != Self.encodedLineNumber &&
@@ -474,7 +578,8 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
             leftNumber: storedLeft.number,
             rightNumber: storedRight.number,
             kind: kind,
-            sharesText: sharesText
+            sharesText: sharesText,
+            hasEqualSourceRecords: hasEqualSourceRecords
         )
     }
 
@@ -483,14 +588,16 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         rightNumber: Int?,
         storage: DiffRowTextStorage,
         kind: DiffKind,
-        sharesText: Bool
+        sharesText: Bool,
+        hasEqualSourceRecords: Bool
     ) {
         self.storage = storage
         metadata = Self.metadata(
             leftNumber: leftNumber ?? 0,
             rightNumber: rightNumber ?? 0,
             kind: kind,
-            sharesText: sharesText
+            sharesText: sharesText,
+            hasEqualSourceRecords: hasEqualSourceRecords
         )
     }
 
@@ -505,7 +612,11 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
             rightNumber: rightNumber,
             storage: storage,
             kind: kind,
-            sharesText: false
+            sharesText: false,
+            hasEqualSourceRecords: storage.sourceRecordsEqual(
+                leftNumber: leftNumber,
+                rightNumber: rightNumber
+            )
         )
     }
 
@@ -513,7 +624,8 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         leftNumber: Int,
         rightNumber: Int,
         kind: DiffKind,
-        sharesText: Bool
+        sharesText: Bool,
+        hasEqualSourceRecords: Bool
     ) -> UInt64 {
         let kindValue: UInt64 = switch kind {
         case .unchanged: 0
@@ -524,7 +636,8 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         return UInt64(leftNumber) |
             (UInt64(rightNumber) << Self.lineNumberBits) |
             (kindValue << (Self.lineNumberBits * 2)) |
-            (sharesText ? Self.sharesTextBit : 0)
+            (sharesText ? Self.sharesTextBit : 0) |
+            (hasEqualSourceRecords ? Self.equalSourceRecordsBit : 0)
     }
 
     private static func store(_ line: DiffLine?) -> (text: DiffRowText, number: Int) {
@@ -557,6 +670,88 @@ public struct DiffRow: Identifiable, Equatable, Sendable {
         }
         return number
     }
+}
+
+public struct MovedLinePair: Equatable, Sendable {
+    public let leftLine: Int
+    public let rightLine: Int
+}
+
+public struct MovedLines: Equatable, Sendable {
+    private let leftToRight: [UInt64]
+    private let rightToLeft: [UInt64]
+
+    public init() {
+        leftToRight = []
+        rightToLeft = []
+    }
+
+    fileprivate init(leftToRight: [UInt64], rightToLeft: [UInt64]) {
+        self.leftToRight = leftToRight
+        self.rightToLeft = rightToLeft
+    }
+
+    public var isEmpty: Bool { leftToRight.isEmpty && rightToLeft.isEmpty }
+    public var leftToRightCount: Int { leftToRight.count }
+    public var rightToLeftCount: Int { rightToLeft.count }
+    public var shallowStorageBytes: Int {
+        (leftToRight.count + rightToLeft.count) * MemoryLayout<UInt64>.stride
+    }
+
+    public func rightLine(forLeftLine line: Int) -> Int? {
+        partner(for: line, in: leftToRight)
+    }
+
+    public func leftLine(forRightLine line: Int) -> Int? {
+        partner(for: line, in: rightToLeft)
+    }
+
+    public func leftToRightPair(at index: Int) -> MovedLinePair {
+        pair(leftToRight[index], sourceIsLeft: true)
+    }
+
+    public func rightToLeftPair(at index: Int) -> MovedLinePair {
+        pair(rightToLeft[index], sourceIsLeft: false)
+    }
+
+    private func partner(for line: Int, in entries: [UInt64]) -> Int? {
+        guard let source = UInt32(exactly: line), source != 0 else { return nil }
+        var lower = entries.startIndex
+        var upper = entries.endIndex
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            let storedSource = UInt32(entries[middle] >> 32)
+            if storedSource < source {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < entries.endIndex, UInt32(entries[lower] >> 32) == source else {
+            return nil
+        }
+        return Int(UInt32(truncatingIfNeeded: entries[lower]))
+    }
+
+    private func pair(_ entry: UInt64, sourceIsLeft: Bool) -> MovedLinePair {
+        let source = Int(UInt32(entry >> 32))
+        let target = Int(UInt32(truncatingIfNeeded: entry))
+        return sourceIsLeft
+            ? MovedLinePair(leftLine: source, rightLine: target)
+            : MovedLinePair(leftLine: target, rightLine: source)
+    }
+}
+
+public struct LineDiffResult: Equatable, Sendable {
+    public let rows: [DiffRow]
+    public let movedLines: MovedLines
+    public let movedLineAnalysisStatus: MovedLineAnalysisStatus
+}
+
+public enum MovedLineAnalysisStatus: Equatable, Sendable {
+    case notRequested
+    case available
+    case unavailableWithinResourceLimits
 }
 
 public struct DiffSummary: Equatable, Sendable {
@@ -596,11 +791,24 @@ public struct DiffSummary: Equatable, Sendable {
 }
 
 public enum LineDiff {
+    static let transformedMoveAnalysisMaximumBytesPerFile = 8 * 1024 * 1024
+    static let transformedMoveAnalysisMaximumLinesPerFile = 64 * 1024
+
     public static func compare(
         left leftText: String,
         right rightText: String,
         options: LineDiffOptions = LineDiffOptions()
     ) throws -> [DiffRow] {
+        var rowOptions = options
+        rowOptions.detectMovedBlocks = false
+        return try compareResult(left: leftText, right: rightText, options: rowOptions).rows
+    }
+
+    public static func compareResult(
+        left leftText: String,
+        right rightText: String,
+        options: LineDiffOptions = LineDiffOptions()
+    ) throws -> LineDiffResult {
         try validateInput(leftText)
         try validateInput(rightText)
         let leftDocument = TextDocument(text: leftText)
@@ -611,16 +819,54 @@ public enum LineDiff {
         )
         let transform = try ComparisonTransform(options: options)
         let commentFiltered = transform.commentFilteredPair(left: leftDocument, right: rightDocument)
-        let hunks = try nativeHunks(
+        let native = try nativeComparison(
             left: leftDocument.comparisonText(options: options),
             right: rightDocument.comparisonText(options: options),
-            options: options
+            options: options,
+            detectMoves: options.detectMovedBlocks && !transform.isActive
         )
+        let movedLines: MovedLines
+        let movedLineAnalysisStatus: MovedLineAnalysisStatus
+        if options.detectMovedBlocks && transform.isActive {
+            if transformedMoveAnalysisIsWithinBudget(
+                leftByteCount: leftText.utf8.count,
+                rightByteCount: rightText.utf8.count,
+                leftLineCount: leftDocument.records.count,
+                rightLineCount: rightDocument.records.count
+            ) {
+                do {
+                    let prepared = try transform.prepare(
+                        left: leftDocument,
+                        right: rightDocument,
+                        options: options,
+                        leftComments: commentFiltered?.left,
+                        rightComments: commentFiltered?.right,
+                        maximumBytes: transformedMoveAnalysisMaximumBytesPerFile
+                    )
+                    movedLines = try nativeComparison(
+                        left: prepared.left.bytes,
+                        right: prepared.right.bytes,
+                        options: options,
+                        detectMoves: true
+                    ).movedLines
+                    movedLineAnalysisStatus = .available
+                } catch LineDiffError.inputTooLarge(maximumBytes: _) {
+                    movedLines = MovedLines()
+                    movedLineAnalysisStatus = .unavailableWithinResourceLimits
+                }
+            } else {
+                movedLines = MovedLines()
+                movedLineAnalysisStatus = .unavailableWithinResourceLimits
+            }
+        } else {
+            movedLines = native.movedLines
+            movedLineAnalysisStatus = options.detectMovedBlocks ? .available : .notRequested
+        }
         var rows: [DiffRow] = []
         var leftIndex = 0
         var rightIndex = 0
 
-        for hunk in hunks {
+        for hunk in native.hunks {
             guard hunk.leftStart >= leftIndex,
                   hunk.rightStart >= rightIndex,
                   hunk.leftStart <= leftDocument.records.count,
@@ -684,7 +930,23 @@ public enum LineDiff {
             rightIndex += 1
         }
 
-        return rows
+        return LineDiffResult(
+            rows: rows,
+            movedLines: movedLines,
+            movedLineAnalysisStatus: movedLineAnalysisStatus
+        )
+    }
+
+    static func transformedMoveAnalysisIsWithinBudget(
+        leftByteCount: Int,
+        rightByteCount: Int,
+        leftLineCount: Int,
+        rightLineCount: Int
+    ) -> Bool {
+        leftByteCount <= transformedMoveAnalysisMaximumBytesPerFile &&
+            rightByteCount <= transformedMoveAnalysisMaximumBytesPerFile &&
+            leftLineCount <= transformedMoveAnalysisMaximumLinesPerFile &&
+            rightLineCount <= transformedMoveAnalysisMaximumLinesPerFile
     }
 
     private static func validateInput(_ text: String) throws {
@@ -900,7 +1162,12 @@ public enum LineDiff {
         right: String,
         options: LineDiffOptions
     ) throws -> [NativeHunk] {
-        try nativeHunks(left: Array(left.utf8), right: Array(right.utf8), options: options)
+        try nativeComparison(
+            left: Array(left.utf8),
+            right: Array(right.utf8),
+            options: options,
+            detectMoves: false
+        ).hunks
     }
 
     private static func nativeHunks(
@@ -908,34 +1175,83 @@ public enum LineDiff {
         right rightBytes: [UInt8],
         options: LineDiffOptions
     ) throws -> [NativeHunk] {
+        try nativeComparison(
+            left: leftBytes,
+            right: rightBytes,
+            options: options,
+            detectMoves: false
+        ).hunks
+    }
+
+    private static func nativeComparison(
+        left: String,
+        right: String,
+        options: LineDiffOptions,
+        detectMoves: Bool
+    ) throws -> NativeComparison {
+        try nativeComparison(
+            left: Array(left.utf8),
+            right: Array(right.utf8),
+            options: options,
+            detectMoves: detectMoves
+        )
+    }
+
+    private static func nativeComparison(
+        left leftBytes: [UInt8],
+        right rightBytes: [UInt8],
+        options: LineDiffOptions,
+        detectMoves: Bool
+    ) throws -> NativeComparison {
         let maximumBytes = Int(MMX_MAX_INPUT_SIZE)
         guard leftBytes.count <= maximumBytes, rightBytes.count <= maximumBytes else {
             throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
         }
         var result = mmx_diff_result(hunks: nil, count: 0)
+        var moved = mmx_moved_result(
+            left_to_right: nil,
+            left_to_right_count: 0,
+            right_to_left: nil,
+            right_to_left_count: 0
+        )
         let status = leftBytes.withUnsafeBytes { leftBuffer in
             rightBytes.withUnsafeBytes { rightBuffer in
-                mmx_diff(
-                    leftBuffer.baseAddress,
-                    leftBuffer.count,
-                    rightBuffer.baseAddress,
-                    rightBuffer.count,
-                    options.nativeFlags,
-                    &result
-                )
+                if detectMoves {
+                    mmx_diff_with_moves(
+                        leftBuffer.baseAddress,
+                        leftBuffer.count,
+                        rightBuffer.baseAddress,
+                        rightBuffer.count,
+                        options.nativeFlags,
+                        &result,
+                        &moved
+                    )
+                } else {
+                    mmx_diff(
+                        leftBuffer.baseAddress,
+                        leftBuffer.count,
+                        rightBuffer.baseAddress,
+                        rightBuffer.count,
+                        options.nativeFlags,
+                        &result
+                    )
+                }
             }
         }
         defer { mmx_diff_result_free(&result) }
+        defer { mmx_moved_result_free(&moved) }
 
         guard status == 0 else {
             throw LineDiffError.nativeEngineFailure(status)
         }
-        guard result.count == 0 || result.hunks != nil else {
+        guard (result.count == 0 || result.hunks != nil),
+              (moved.left_to_right_count == 0 || moved.left_to_right != nil),
+              (moved.right_to_left_count == 0 || moved.right_to_left != nil) else {
             throw LineDiffError.invalidNativeResult
         }
 
         let native = UnsafeBufferPointer(start: result.hunks, count: result.count)
-        return try native.map { hunk in
+        let hunks = try native.map { hunk in
             guard hunk.left_start >= 0,
                   hunk.left_count >= 0,
                   hunk.right_start >= 0,
@@ -954,7 +1270,48 @@ public enum LineDiff {
                 isTrivial: hunk.is_trivial != 0
             )
         }
+        return NativeComparison(
+            hunks: hunks,
+            movedLines: try movedLines(from: moved)
+        )
     }
+
+    private static func movedLines(from result: mmx_moved_result) throws -> MovedLines {
+        func entries(
+            _ pointer: UnsafeMutablePointer<mmx_moved_line>?,
+            count: Int,
+            sourceIsLeft: Bool
+        ) throws -> [UInt64] {
+            let native = UnsafeBufferPointer(start: pointer, count: count)
+            return try native.map { pair in
+                guard pair.left_line >= 0, pair.right_line >= 0 else {
+                    throw LineDiffError.invalidNativeResult
+                }
+                let left = UInt32(pair.left_line) + 1
+                let right = UInt32(pair.right_line) + 1
+                let source = sourceIsLeft ? left : right
+                let target = sourceIsLeft ? right : left
+                return UInt64(source) << 32 | UInt64(target)
+            }
+        }
+        return try MovedLines(
+            leftToRight: entries(
+                result.left_to_right,
+                count: result.left_to_right_count,
+                sourceIsLeft: true
+            ),
+            rightToLeft: entries(
+                result.right_to_left,
+                count: result.right_to_left_count,
+                sourceIsLeft: false
+            )
+        )
+    }
+}
+
+private struct NativeComparison {
+    let hunks: [NativeHunk]
+    let movedLines: MovedLines
 }
 
 private struct NativeHunk {
@@ -963,6 +1320,62 @@ private struct NativeHunk {
     let rightStart: Int
     let rightCount: Int
     let isTrivial: Bool
+}
+
+private final class CompiledLineFilter {
+    private let handle: UnsafeMutableRawPointer
+
+    init(pattern: String, caseSensitive: Bool) throws {
+        let patternBytes = Array(pattern.utf8)
+        var nativeFilter: UnsafeMutableRawPointer?
+        let status = patternBytes.withUnsafeBytes { patternBuffer in
+            mmx_line_filter_create(
+                patternBuffer.baseAddress,
+                patternBuffer.count,
+                caseSensitive ? 1 : 0,
+                &nativeFilter
+            )
+        }
+        guard status == 0, let nativeFilter else {
+            if status == 1 {
+                throw LineDiffError.invalidRegularExpression(pattern)
+            }
+            throw LineDiffError.lineFilterEngineFailure(status)
+        }
+        handle = nativeFilter
+    }
+
+    deinit {
+        mmx_line_filter_free(handle)
+    }
+
+    func matches(_ subject: String) throws -> Bool {
+        var matched: Int32 = 0
+        let status = withUTF8Bytes(of: subject) { subjectBuffer in
+            mmx_line_filter_matches(
+                handle,
+                subjectBuffer.baseAddress,
+                subjectBuffer.count,
+                &matched
+            )
+        }
+        guard status == 0 else {
+            throw LineDiffError.lineFilterEngineFailure(status)
+        }
+        return matched != 0
+    }
+}
+
+private func withUTF8Bytes<Result>(
+    of string: String,
+    _ body: (UnsafeRawBufferPointer) -> Result
+) -> Result {
+    if let result = string.utf8.withContiguousStorageIfAvailable({ buffer in
+        body(UnsafeRawBufferPointer(buffer))
+    }) {
+        return result
+    }
+    return Array(string.utf8).withUnsafeBytes(body)
 }
 
 private struct PreparedComparison {
@@ -1064,7 +1477,7 @@ private struct ComparisonTransform {
     private struct CompiledRule {
         let pattern: String
         let caseSensitive: Bool
-        let expression: NSRegularExpression
+        let lineFilter: CompiledLineFilter?
         let replacement: [ReplacementPart]?
 
         var replacementBytes: [UInt8] { replacement?.flatMap(\.bytes) ?? [] }
@@ -1087,7 +1500,10 @@ private struct ComparisonTransform {
             return CompiledRule(
                 pattern: $0.pattern,
                 caseSensitive: $0.caseSensitive,
-                expression: try Self.compile(pattern: $0.pattern, caseSensitive: $0.caseSensitive),
+                lineFilter: try CompiledLineFilter(
+                    pattern: $0.pattern,
+                    caseSensitive: $0.caseSensitive
+                ),
                 replacement: nil
             )
         }
@@ -1104,7 +1520,7 @@ private struct ComparisonTransform {
             return CompiledRule(
                 pattern: $0.pattern,
                 caseSensitive: $0.caseSensitive,
-                expression: try Self.compile(pattern: "(?:)", caseSensitive: true),
+                lineFilter: nil,
                 replacement: try Self.parseReplacement($0.replacement)
             )
         }
@@ -1117,7 +1533,8 @@ private struct ComparisonTransform {
         right: TextDocument,
         options: LineDiffOptions,
         leftComments: CommentFilteredContents? = nil,
-        rightComments: CommentFilteredContents? = nil
+        rightComments: CommentFilteredContents? = nil,
+        maximumBytes: Int? = nil
     ) throws -> PreparedComparisonPair {
         let marker = collisionFreeMarker(left: left.text, right: right.text)
         return try PreparedComparisonPair(
@@ -1125,13 +1542,15 @@ private struct ComparisonTransform {
                 document: left,
                 marker: marker,
                 options: options,
-                commentFiltered: leftComments
+                commentFiltered: leftComments,
+                maximumBytes: maximumBytes
             ),
             right: prepare(
                 document: right,
                 marker: marker,
                 options: options,
-                commentFiltered: rightComments
+                commentFiltered: rightComments,
+                maximumBytes: maximumBytes
             )
         )
     }
@@ -1140,36 +1559,57 @@ private struct ComparisonTransform {
         document: TextDocument,
         marker: String,
         options: LineDiffOptions,
-        commentFiltered: CommentFilteredContents?
+        commentFiltered: CommentFilteredContents?,
+        maximumBytes: Int?
     ) throws -> PreparedComparison {
         var contents: [String] = []
         var filteredLines: [Bool] = []
-        let maximumBytes = Int(MMX_MAX_INPUT_SIZE)
+        let replacementMaximumBytes = maximumBytes ?? Int(MMX_MAX_INPUT_SIZE)
         let commentFiltered = commentFiltered ?? commentFilteredContents(in: document)
         contents.reserveCapacity(document.records.count)
         filteredLines.reserveCapacity(document.records.count)
 
         for (index, record) in document.records.enumerated() {
             let content = commentFiltered?.contents[index] ?? record.content
-            let fullRange = NSRange(content.startIndex..<content.endIndex, in: content)
-            let isFiltered = commentFiltered?.commentOnly[index] == true || lineFilters.contains {
-                $0.expression.firstMatch(in: content, range: fullRange) != nil
+            var isFiltered = commentFiltered?.commentOnly[index] == true
+            if !isFiltered {
+                for rule in lineFilters {
+                    try Task.checkCancellation()
+                    if try rule.lineFilter?.matches(content) == true {
+                        isFiltered = true
+                        break
+                    }
+                }
             }
             contents.append(isFiltered ? marker : content)
             filteredLines.append(isFiltered)
         }
 
-        let transformedText = zip(contents, document.records)
-            .map { $0 + $1.terminator }
-            .joined()
-        var transformedBytes = Array(transformedText.utf8)
+        var transformedBytes: [UInt8]
+        if let maximumBytes {
+            transformedBytes = []
+            transformedBytes.reserveCapacity(min(maximumBytes, document.text.utf8.count))
+            for (content, record) in zip(contents, document.records) {
+                let addedByteCount = content.utf8.count + record.terminator.utf8.count
+                guard addedByteCount <= maximumBytes - transformedBytes.count else {
+                    throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
+                }
+                transformedBytes.append(contentsOf: content.utf8)
+                transformedBytes.append(contentsOf: record.terminator.utf8)
+            }
+        } else {
+            let transformedText = zip(contents, document.records)
+                .map { $0 + $1.terminator }
+                .joined()
+            transformedBytes = Array(transformedText.utf8)
+        }
         for substitution in substitutions {
             transformedBytes = try Self.replaceBytes(
                 in: transformedBytes,
                 pattern: Array(substitution.pattern.utf8),
                 replacement: substitution.replacementBytes,
                 caseSensitive: substitution.caseSensitive,
-                maximumBytes: maximumBytes
+                maximumBytes: replacementMaximumBytes
             )
         }
         var transformedRecords = Self.byteRecords(transformedBytes)
@@ -1182,21 +1622,35 @@ private struct ComparisonTransform {
             throw LineDiffError.filterChangedLineStructure
         }
         var comparisonBytes: [UInt8] = []
-        comparisonBytes.reserveCapacity(transformedBytes.count + transformedRecords.count * 2)
+        let comparisonCapacity = transformedBytes.count + transformedRecords.count * 2
+        comparisonBytes.reserveCapacity(maximumBytes.map { min($0, comparisonCapacity) } ?? comparisonCapacity)
+        let markerBytes = Array(marker.utf8)
         for (index, record) in transformedRecords.enumerated() {
             let (content, terminator) = record
             let isFiltered = filteredLines[index]
+            let comparisonTerminator = options.ignoreLineEndings ? [10] : terminator
             if isFiltered {
-                comparisonBytes.append(contentsOf: marker.utf8)
-                comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
+                let addedByteCount = markerBytes.count + comparisonTerminator.count
+                if let maximumBytes,
+                   addedByteCount > maximumBytes - comparisonBytes.count {
+                    throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
+                }
+                comparisonBytes.append(contentsOf: markerBytes)
+                comparisonBytes.append(contentsOf: comparisonTerminator)
                 continue
             }
             let preservesBlankLine = options.ignoreBlankLines &&
                 content.allSatisfy { $0 == 32 || (9...13).contains($0) }
             if preservesBlankLine { filteredLines[index] = true }
-            if !preservesBlankLine, prefixesContent { comparisonBytes.append(contentsOf: [85, 58]) }
+            let prefixByteCount = !preservesBlankLine && prefixesContent ? 2 : 0
+            let addedByteCount = prefixByteCount + content.count + comparisonTerminator.count
+            if let maximumBytes,
+               addedByteCount > maximumBytes - comparisonBytes.count {
+                throw LineDiffError.inputTooLarge(maximumBytes: maximumBytes)
+            }
+            if prefixByteCount != 0 { comparisonBytes.append(contentsOf: [85, 58]) }
             comparisonBytes.append(contentsOf: content)
-            comparisonBytes.append(contentsOf: options.ignoreLineEndings ? [10] : terminator)
+            comparisonBytes.append(contentsOf: comparisonTerminator)
         }
 
         return PreparedComparison(
@@ -3916,17 +4370,6 @@ private struct ComparisonTransform {
                 return marker
             }
             suffix += 1
-        }
-    }
-
-    private static func compile(pattern: String, caseSensitive: Bool) throws -> NSRegularExpression {
-        do {
-            return try NSRegularExpression(
-                pattern: pattern,
-                options: caseSensitive ? .anchorsMatchLines : [.caseInsensitive, .anchorsMatchLines]
-            )
-        } catch {
-            throw LineDiffError.invalidRegularExpression(pattern)
         }
     }
 

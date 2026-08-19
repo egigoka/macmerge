@@ -165,7 +165,7 @@ final class TextFileDocumentTests: XCTestCase {
         let destination = source.deletingLastPathComponent().appending(path: "copy.txt")
         let document = try TextFileDocumentIO.load(from: source, assuming: .shiftJIS)
 
-        let saved = try TextFileDocumentIO.saveAs(document, to: destination)
+        let saved = try TextFileDocumentIO.saveAs(document, to: destination).document
 
         XCTAssertEqual(try Data(contentsOf: source), original)
         XCTAssertEqual(try Data(contentsOf: destination), original)
@@ -179,7 +179,7 @@ final class TextFileDocumentTests: XCTestCase {
         var document = try TextFileDocumentIO.load(from: source)
         document.text = "new\r\n"
 
-        let saved = try TextFileDocumentIO.saveAs(document, to: destination)
+        let saved = try TextFileDocumentIO.saveAs(document, to: destination).document
 
         XCTAssertEqual(try Data(contentsOf: source), Data([0xEF, 0xBB, 0xBF]) + Data("old\r\n".utf8))
         XCTAssertEqual(try Data(contentsOf: destination), Data([0xEF, 0xBB, 0xBF]) + Data("new\r\n".utf8))

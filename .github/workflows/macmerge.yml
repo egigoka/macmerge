@@ -6,6 +6,7 @@ on:
     paths:
       - "MacMerge/**"
       - "Externals/xdiff/**"
+      - "Externals/poco/dependencies/pcre2/**"
       - ".github/workflows/macmerge.yml"
       - "todo.md"
   pull_request:
@@ -13,6 +14,7 @@ on:
     paths:
       - "MacMerge/**"
       - "Externals/xdiff/**"
+      - "Externals/poco/dependencies/pcre2/**"
       - ".github/workflows/macmerge.yml"
       - "todo.md"
 
@@ -20,7 +22,36 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: MacMerge
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Test CI quality contracts
+        run: Scripts/test-ci-quality.sh
+
+      - name: Check Swift formatting
+        run: Scripts/check-format.sh
+
+      - name: Check extension design contract
+        run: Scripts/check-extension-design.sh
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Check shell scripts
+        run: shellcheck Scripts/*.sh
+
+      - name: Analyze native bridge
+        run: Scripts/analyze-native.sh
+
   test-and-package:
+    needs: quality
     runs-on: macos-15
     defaults:
       run:
@@ -81,6 +112,15 @@ jobs:
           REPORT_PATH: ${{ github.workspace }}/MacMerge/dist/performance-wide-unicode-report.json
         run: Scripts/run-performance-budgets.sh
 
+      - name: Enforce dense Location Pane packaged budget
+        env:
+          SKIP_PACKAGE: 1
+          LINE_COUNT: 250000
+          FIXTURE_DENSITY: location-dense
+          RESIDENT_BUDGET_MIB: 450
+          REPORT_PATH: ${{ github.workspace }}/MacMerge/dist/performance-dense-report.json
+        run: Scripts/run-performance-budgets.sh
+
       - name: Capture packaged-app performance trace
         env:
           SKIP_PACKAGE: 1
@@ -112,8 +152,13 @@ jobs:
             MacMerge/benchmark-tabs.csv
             MacMerge/benchmark-wide-unicode.csv
             MacMerge/dist/performance-report.json
+            MacMerge/dist/performance-report.json.sha256
             MacMerge/dist/performance-tabs-report.json
+            MacMerge/dist/performance-tabs-report.json.sha256
             MacMerge/dist/performance-wide-unicode-report.json
+            MacMerge/dist/performance-wide-unicode-report.json.sha256
+            MacMerge/dist/performance-dense-report.json
+            MacMerge/dist/performance-dense-report.json.sha256
             MacMerge/dist/MacMerge-performance.trace
             MacMerge/dist/performance-trace-report.json
           if-no-files-found: error

@@ -18,6 +18,7 @@ content=${FIXTURE_CONTENT:-ascii}
 line_bytes=${FIXTURE_LINE_BYTES:-}
 app="$package_root/dist/MacMerge.app"
 app_executable="$app/Contents/MacOS/MacMerge"
+runtime_report=""
 trace_pid=""
 app_pid=""
 existing_pid=""
@@ -72,6 +73,7 @@ cleanup() {
     if [[ $owns_fixture_dir == 1 ]]; then
         rm -rf "$fixture_dir"
     fi
+    rm -f "$runtime_report"
 }
 trap cleanup EXIT
 
@@ -83,13 +85,15 @@ fi
 if [[ ${SKIP_PACKAGE:-0} != 1 ]]; then
     "$package_root/Scripts/package-app.sh" >/dev/null
 fi
+bundle_identifier=$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")
+runtime_report="$HOME/Library/Containers/$bundle_identifier/Data/tmp/macmerge-trace-$$.json"
 
 mkdir -p "$fixture_dir" "$(dirname "$report")" "$(dirname "$trace")"
 if [[ -e "$trace" ]]; then
     echo "Refusing to replace existing trace path: $trace" >&2
     exit 1
 fi
-rm -f "$report"
+rm -f "$report" "$runtime_report"
 benchmark_arguments=(
     --lines "$line_count"
     --density "$density"
@@ -117,7 +121,7 @@ xcrun xctrace record \
     --template "$template" \
     --time-limit "$time_limit" \
     --output "$trace" \
-    --env "MACMERGE_PERFORMANCE_REPORT=$report" \
+    --env "MACMERGE_PERFORMANCE_REPORT=$runtime_report" \
     --env "MACMERGE_PERFORMANCE_AUTOSCROLL=1" \
     --launch -- \
     "$app" &
@@ -207,10 +211,11 @@ for interval in LoadPair Comparison FirstVisibleRow AutoScroll; do
         exit 1
     fi
 done
-if [[ ! -s "$report" ]] || [[ $(plutil -extract complete raw "$report" 2>/dev/null || true) != 1 ]]; then
+if [[ ! -s "$runtime_report" ]] || [[ $(plutil -extract complete raw "$runtime_report" 2>/dev/null || true) != 1 ]]; then
     echo "Traced app did not complete packaged performance workflow." >&2
     exit 1
 fi
+cp "$runtime_report" "$report"
 for metric in load_ms comparison_ms first_render_ms scroll_ms resident_mib; do
     value=$(plutil -extract "$metric" raw "$report" 2>/dev/null || true)
     if [[ ! "$value" =~ ^[0-9]+$ ]] || [[ "$metric" == resident_mib && "$value" == 0 ]]; then

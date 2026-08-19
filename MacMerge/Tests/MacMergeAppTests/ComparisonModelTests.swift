@@ -1,10 +1,196 @@
+import AppKit
 import Foundation
-@testable import MacMerge
 import MacMergeCore
 import XCTest
 
+@testable import MacMerge
+
 @MainActor
 final class ComparisonModelTests: XCTestCase {
+    func testSecurityScopedBookmarksPersistAcrossStores() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let url = URL(filePath: "/tmp/MacMerge/bookmarked.txt")
+        var createdURLs: [URL] = []
+
+        let firstStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: {
+                createdURLs.append($0)
+                return Data($0.path.utf8)
+            },
+            resolveBookmark: { _ in
+                XCTFail("New bookmarks should not be resolved")
+                return .init(url: url, isStale: false)
+            }
+        )
+        try firstStore.persistAccess(to: url)
+
+        let secondStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in
+                XCTFail("Persisted bookmark should be reused")
+                return Data()
+            },
+            resolveBookmark: {
+                SecurityScopedBookmarkStore.Resolution(
+                    url: URL(filePath: String(decoding: $0, as: UTF8.self)),
+                    isStale: false
+                )
+            }
+        )
+
+        XCTAssertEqual(secondStore.resolveAccess(to: url), url)
+        XCTAssertEqual(createdURLs, [url])
+    }
+
+    func testSecurityScopedBookmarksRefreshStaleResolvedURL() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let originalURL = URL(filePath: "/tmp/MacMerge/original.txt")
+        let movedURL = URL(filePath: "/tmp/MacMerge/moved.txt")
+        let initialStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data("old".utf8) },
+            resolveBookmark: { _ in
+                XCTFail("No bookmark should exist yet")
+                return .init(url: originalURL, isStale: false)
+            }
+        )
+        try initialStore.persistAccess(to: originalURL)
+
+        let refreshingStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { Data("fresh:\($0.path)".utf8) },
+            resolveBookmark: { _ in .init(url: movedURL, isStale: true) }
+        )
+        XCTAssertEqual(refreshingStore.resolveAccess(to: originalURL), movedURL)
+
+        let verifyingStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in
+                XCTFail("Refreshed bookmark should be reused")
+                return Data()
+            },
+            resolveBookmark: {
+                XCTAssertEqual(String(decoding: $0, as: UTF8.self), "fresh:\(movedURL.path)")
+                return .init(url: movedURL, isStale: false)
+            }
+        )
+        XCTAssertEqual(verifyingStore.resolveAccess(to: movedURL), movedURL)
+    }
+
+    func testSecurityScopedBookmarksAliasMovedResolutionWithoutDiscardingOriginal() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let original = URL(filePath: "/tmp/MacMerge/original.txt")
+        let moved = URL(filePath: "/tmp/MacMerge/moved.txt")
+        let initial = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data("bookmark".utf8) },
+            resolveBookmark: { _ in .init(url: original, isStale: false) }
+        )
+        try initial.persistAccess(to: original)
+        let resolving = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in
+                XCTFail("Non-stale alias must reuse bookmark")
+                return Data()
+            },
+            resolveBookmark: { _ in .init(url: moved, isStale: false) }
+        )
+
+        XCTAssertEqual(resolving.resolveAccess(to: original), moved)
+        XCTAssertTrue(resolving.hasPersistedAccess(to: original))
+        XCTAssertTrue(resolving.hasPersistedAccess(to: moved))
+    }
+
+    func testSecurityScopedBookmarksPreserveInvalidDataUntilExplicitReplacement() throws {
+        struct InvalidBookmark: Error {}
+
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let url = URL(filePath: "/tmp/MacMerge/recovered.txt")
+        let initialStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data("invalid".utf8) },
+            resolveBookmark: { _ in
+                XCTFail("No bookmark should exist yet")
+                return .init(url: url, isStale: false)
+            }
+        )
+        try initialStore.persistAccess(to: url)
+
+        let recoveringStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in
+                XCTFail("Resolution must not replace invalid data")
+                return Data()
+            },
+            resolveBookmark: { _ in throw InvalidBookmark() }
+        )
+        XCTAssertEqual(recoveringStore.resolveAccess(to: url), url)
+        XCTAssertFalse(recoveringStore.hasPersistedAccess(to: url))
+
+        let replacingStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { Data("valid:\($0.path)".utf8) },
+            resolveBookmark: { _ in throw InvalidBookmark() }
+        )
+        try replacingStore.persistAccess(to: url)
+
+        let verifyingStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in
+                XCTFail("Replacement bookmark should be reused")
+                return Data()
+            },
+            resolveBookmark: {
+                XCTAssertEqual(String(decoding: $0, as: UTF8.self), "valid:\(url.path)")
+                return .init(url: url, isStale: false)
+            }
+        )
+        XCTAssertEqual(verifyingStore.resolveAccess(to: url), url)
+    }
+
+    func testFailedBookmarkReplacementClearsStaleMappingForReusedPath() throws {
+        struct BookmarkFailure: Error {}
+
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let reused = URL(filePath: "/tmp/MacMerge/reused.txt")
+        let movedOldFile = URL(filePath: "/tmp/MacMerge/moved-old.txt")
+        let initial = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data("old".utf8) },
+            resolveBookmark: { _ in .init(url: reused, isStale: false) }
+        )
+        try initial.persistAccess(to: reused)
+        let replacement = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in throw BookmarkFailure() },
+            resolveBookmark: { _ in .init(url: movedOldFile, isStale: false) }
+        )
+
+        XCTAssertThrowsError(try replacement.persistAccess(to: reused))
+
+        let verifying = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data() },
+            resolveBookmark: { _ in
+                XCTFail("Stale mapping must be removed")
+                return .init(url: movedOldFile, isStale: false)
+            }
+        )
+        XCTAssertEqual(verifying.resolveAccess(to: reused), reused)
+        XCTAssertFalse(verifying.hasPersistedAccess(to: reused))
+    }
+
     func testLocationMapCompactsRunsAndMapsFractionsToRows() {
         let rows = [
             DiffRow(left: DiffLine(number: 1, text: "same"), right: DiffLine(number: 1, text: "same"), kind: .unchanged),
@@ -12,17 +198,19 @@ final class ComparisonModelTests: XCTestCase {
             DiffRow(left: DiffLine(number: 3, text: "left"), right: DiffLine(number: 3, text: "right"), kind: .modified),
             DiffRow(left: DiffLine(number: 4, text: "removed"), right: nil, kind: .removed),
             DiffRow(left: nil, right: DiffLine(number: 4, text: "added"), kind: .added),
-            DiffRow(left: DiffLine(number: 5, text: "same"), right: DiffLine(number: 5, text: "same"), kind: .unchanged),
+            DiffRow(left: DiffLine(number: 5, text: "same"), right: DiffLine(number: 5, text: "same"), kind: .unchanged)
         ]
 
         let map = LocationMap(rows: rows)
 
         XCTAssertEqual(map.rowCount, 6)
-        XCTAssertEqual(map.blocks, [
-            LocationMapBlock(startRow: 1, endRow: 3, kind: .modified),
-            LocationMapBlock(startRow: 3, endRow: 4, kind: .removed),
-            LocationMapBlock(startRow: 4, endRow: 5, kind: .added),
-        ])
+        XCTAssertEqual(
+            map.blocks,
+            [
+                LocationMapBlock(startRow: 1, endRow: 3, kind: .modified),
+                LocationMapBlock(startRow: 3, endRow: 4, kind: .removed),
+                LocationMapBlock(startRow: 4, endRow: 5, kind: .added)
+            ])
         XCTAssertEqual(map.shallowStorageBytes, 3 * MemoryLayout<UInt64>.stride)
         XCTAssertEqual(map.rowIndex(at: -1), 0)
         XCTAssertEqual(map.rowIndex(at: 0.5), 3)
@@ -46,19 +234,72 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertNil(viewport.centeredRow(at: 0.5, totalRowCount: 0))
     }
 
+    func testLocationPanePreferencesPersistAndClampWidth() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let model = ComparisonModel(userDefaults: userDefaults)
+
+        XCTAssertTrue(model.isLocationPaneVisible)
+        XCTAssertEqual(model.locationPaneWidth, 92)
+        XCTAssertTrue(model.locationPaneMovesCursorOnClick)
+
+        model.setLocationPaneVisible(false)
+        model.setLocationPaneWidth(500)
+        model.setLocationPaneMovesCursorOnClick(false)
+
+        let restored = ComparisonModel(userDefaults: userDefaults)
+        XCTAssertFalse(restored.isLocationPaneVisible)
+        XCTAssertEqual(restored.locationPaneWidth, ComparisonModel.maximumLocationPaneWidth)
+        XCTAssertFalse(restored.locationPaneMovesCursorOnClick)
+
+        restored.setLocationPaneWidth(1)
+        XCTAssertEqual(restored.locationPaneWidth, ComparisonModel.minimumLocationPaneWidth)
+        XCTAssertEqual(ComparisonModel.clampedLocationPaneWidth(120), 120)
+        XCTAssertEqual(ComparisonModel.clampedLocationPaneWidth(.nan), 92)
+    }
+
+    func testPerformanceRunCanForceLocationPaneVisible() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        userDefaults.set(false, forKey: "locationPane.visible")
+
+        let model = ComparisonModel(
+            userDefaults: userDefaults,
+            forceLocationPaneVisible: true
+        )
+
+        XCTAssertTrue(model.isLocationPaneVisible)
+    }
+
+    func testLocationPaneMovedBlockCommandPersistsComparisonOption() throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let model = ComparisonModel(userDefaults: userDefaults)
+
+        model.setDetectMovedBlocks(true)
+
+        XCTAssertTrue(model.options.detectMovedBlocks)
+        XCTAssertTrue(ComparisonModel(userDefaults: userDefaults).options.detectMovedBlocks)
+    }
+
     func testLocationMapWorstCaseStorageUsesOneWordPerRun() {
         var map = LocationMap()
-        for index in 0 ..< 100_000 {
+        for index in 0..<100_000 {
             map.append(index.isMultiple(of: 2) ? .modified : .added)
         }
 
         XCTAssertEqual(map.blockCount, 100_000)
         XCTAssertEqual(map.shallowStorageBytes, 100_000 * MemoryLayout<UInt64>.stride)
-        XCTAssertEqual(map.block(at: 99_999), LocationMapBlock(
-            startRow: 99_999,
-            endRow: 100_000,
-            kind: .added
-        ))
+        XCTAssertEqual(
+            map.block(at: 99_999),
+            LocationMapBlock(
+                startRow: 99_999,
+                endRow: 100_000,
+                kind: .added
+            ))
     }
 
     func testDifferenceLocationsUseCompactCollisionSafeStorage() {
@@ -93,7 +334,7 @@ final class ComparisonModelTests: XCTestCase {
                 left: nil,
                 right: DiffLine(number: 1_048_576, text: "right"),
                 kind: .added
-            ),
+            )
         ]
         let boundaryLocations = DifferenceLocations(
             rows: boundaryRows,
@@ -101,6 +342,25 @@ final class ComparisonModelTests: XCTestCase {
         )
         XCTAssertEqual(boundaryLocations[boundaryRows[0].id]?.rowIndex, 0)
         XCTAssertEqual(boundaryLocations[boundaryRows[1].id]?.rowIndex, 1)
+    }
+
+    func testMovedRowMapCompactsBlocksAndMapsBothDirections() throws {
+        let result = try LineDiff.compareResult(
+            left: "head\nduplicate\nunique moved seed\nduplicate\nstable one\nstable two\nstable three\ntail",
+            right: "head\nstable one\nstable two\nstable three\nduplicate\nunique moved seed\nduplicate\ntail",
+            options: LineDiffOptions(detectMovedBlocks: true)
+        )
+        let map = MovedRowMap(rows: result.rows, movedLines: result.movedLines)
+        let leftSourceRow = try XCTUnwrap(result.rows.firstIndex { $0.left?.number == 2 })
+        let rightTargetRow = try XCTUnwrap(result.rows.firstIndex { $0.right?.number == 5 })
+
+        XCTAssertEqual(map.blockCount, 1)
+        XCTAssertEqual(map.targetRow(forLine: 2, on: .left), rightTargetRow)
+        XCTAssertEqual(map.targetRow(forLine: 5, on: .right), leftSourceRow)
+        XCTAssertTrue(map.isMoved(line: 3, on: .left))
+        XCTAssertTrue(map.isMoved(line: 6, on: .right))
+        XCTAssertNil(map.targetRow(forLine: 1, on: .left))
+        XCTAssertEqual(map.shallowStorageBytes, 64)
     }
 
     func testNewComparisonCreatesTwoEditableUntitledBuffers() async {
@@ -198,6 +458,48 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertTrue(model.canRedo)
     }
 
+    func testUndoRouterPrefersFocusedEditorThenFallsBackToComparisonHistory() async {
+        let model = ComparisonModel()
+        let insertionRow = DiffRow.ID(leftNumber: nil, rightNumber: nil)
+        model.createEmptyComparison()
+        model.editLine(rowID: insertionRow, on: .left, replacement: "model edit")
+        model.finishLineEditing(rowID: insertionRow, on: .left)
+        await waitUntil { model.isComparisonCurrent }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 80),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let textView = NSTextView(frame: window.contentView?.bounds ?? .zero)
+        textView.allowsUndo = true
+        window.contentView?.addSubview(textView)
+        defer {
+            window.makeFirstResponder(nil)
+            textView.undoManager?.removeAllActions()
+            textView.removeFromSuperview()
+            window.contentView = nil
+            window.orderOut(nil)
+            window.close()
+        }
+        XCTAssertTrue(window.makeFirstResponder(textView))
+        textView.insertText("editor edit", replacementRange: NSRange(location: 0, length: 0))
+
+        XCTAssertTrue(ComparisonUndoRouter.canUndo(model: model, focusedTextView: textView))
+        ComparisonUndoRouter.undo(model: model, focusedTextView: textView)
+
+        XCTAssertEqual(textView.string, "")
+        XCTAssertEqual(model.left.text, "model edit")
+        XCTAssertTrue(ComparisonUndoRouter.canRedo(model: model, focusedTextView: textView))
+
+        ComparisonUndoRouter.undo(model: model, focusedTextView: nil)
+        await waitUntil { model.isComparisonCurrent }
+
+        XCTAssertEqual(model.left.text, "")
+    }
+
     func testTwoFileOpenCommitsBothDocumentsTogether() async throws {
         let leftURL = try temporaryFile(name: "left.txt", content: "left\n")
         let rightURL = try temporaryFile(name: "right.txt", content: "right\n")
@@ -243,6 +545,31 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertEqual(
             intralineDifferenceRange(in: "café noir", comparedWith: "café blanc"),
             NSRange(location: 6, length: 4)
+        )
+        XCTAssertEqual(
+            intralineDifferenceRanges(in: "one SAME three SAME", comparedWith: "one same three same"),
+            [NSRange(location: 4, length: 4), NSRange(location: 15, length: 4)]
+        )
+    }
+
+    func testLineDifferenceRangeTraversesAndWrapsBothDirections() {
+        let ranges = [NSRange(location: 4, length: 4), NSRange(location: 15, length: 4)]
+
+        XCTAssertEqual(
+            lineDifferenceRange(in: ranges, from: ranges[0], direction: .next),
+            ranges[1]
+        )
+        XCTAssertEqual(
+            lineDifferenceRange(in: ranges, from: ranges[1], direction: .next),
+            ranges[0]
+        )
+        XCTAssertEqual(
+            lineDifferenceRange(in: ranges, from: ranges[0], direction: .previous),
+            ranges[1]
+        )
+        XCTAssertEqual(
+            lineDifferenceRange(in: ranges, from: NSRange(location: 14, length: 0), direction: .previous),
+            ranges[0]
         )
     }
 
@@ -435,6 +762,24 @@ final class ComparisonModelTests: XCTestCase {
 
         XCTAssertEqual(model.selectedDifferenceRevealRevision, revealRevision + 1)
         XCTAssertEqual(model.lineDifferenceSelectionRevision, selectionRevision + 1)
+        XCTAssertEqual(model.lineDifferenceSelectionDirection, .next)
+    }
+
+    func testSelectPreviousLineDifferenceRequestsReverseSelection() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "one SAME three SAME\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "one same three same\n")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        model.selectFirstDifference()
+        let revealRevision = model.selectedDifferenceRevealRevision
+        let selectionRevision = model.lineDifferenceSelectionRevision
+
+        model.selectPreviousLineDifference()
+
+        XCTAssertEqual(model.selectedDifferenceRevealRevision, revealRevision + 1)
+        XCTAssertEqual(model.lineDifferenceSelectionRevision, selectionRevision + 1)
+        XCTAssertEqual(model.lineDifferenceSelectionDirection, .previous)
     }
 
     func testChangePaneTogglesSideAndRequestsFocus() {
@@ -477,10 +822,11 @@ final class ComparisonModelTests: XCTestCase {
         model.createEmptyComparison()
         model.setMergeMode(true)
 
-        XCTAssertFalse(model.handleMergeModeKey(
-            0,
-            rowID: DiffRow.ID(leftNumber: nil, rightNumber: nil)
-        ))
+        XCTAssertFalse(
+            model.handleMergeModeKey(
+                0,
+                rowID: DiffRow.ID(leftNumber: nil, rightNumber: nil)
+            ))
     }
 
     func testRefreshRecomparesMemoryWithoutReadingChangedDiskFile() async throws {
@@ -565,6 +911,7 @@ final class ComparisonModelTests: XCTestCase {
             ignoreComments: true,
             ignoreLineEndings: false,
             indentHeuristic: true,
+            detectMovedBlocks: true,
             lineFiltersEnabled: false,
             lineFilters: [LineFilterRule(pattern: "^generated:", caseSensitive: false)],
             substitutionsEnabled: false,
@@ -589,24 +936,53 @@ final class ComparisonModelTests: XCTestCase {
 
     func testLegacyComparisonOptionsDefaultFilterEnableFlags() throws {
         let json = """
-        {
-          "algorithm": "default",
-          "whitespace": "compareAll",
-          "ignoreCase": false,
-          "ignoreNumbers": false,
-          "ignoreBlankLines": false,
-          "ignoreLineEndings": true,
-          "indentHeuristic": false,
-          "lineFilters": [{"pattern": "^# ", "caseSensitive": true}],
-          "substitutions": [{"pattern": "\\\\d+", "replacement": "", "caseSensitive": true}]
-        }
-        """
+            {
+              "algorithm": "default",
+              "whitespace": "compareAll",
+              "ignoreCase": false,
+              "ignoreNumbers": false,
+              "ignoreBlankLines": false,
+              "ignoreLineEndings": true,
+              "indentHeuristic": false,
+              "lineFilters": [{"pattern": "^# ", "caseSensitive": true}],
+              "substitutions": [{"pattern": "\\\\d+", "replacement": "", "caseSensitive": true}]
+            }
+            """
 
         let options = try JSONDecoder().decode(LineDiffOptions.self, from: Data(json.utf8))
 
         XCTAssertTrue(options.lineFiltersEnabled)
         XCTAssertTrue(options.substitutionsEnabled)
         XCTAssertFalse(options.ignoreComments)
+        XCTAssertFalse(options.detectMovedBlocks)
+    }
+
+    func testMovedLineNavigationTargetsOtherSide() async throws {
+        let leftURL = try temporaryFile(
+            name: "left.txt",
+            content: "head\nduplicate\nunique moved seed\nduplicate\nstable one\nstable two\nstable three\ntail"
+        )
+        let rightURL = try temporaryFile(
+            name: "right.txt",
+            content: "head\nstable one\nstable two\nstable three\nduplicate\nunique moved seed\nduplicate\ntail"
+        )
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+        XCTAssertTrue(model.movedRows.isEmpty)
+        var options = model.options
+        options.detectMovedBlocks = true
+        model.setOptions(options)
+        await waitUntilIdle(model)
+        let source = try XCTUnwrap(model.rows.first { $0.left?.number == 2 })
+        let target = try XCTUnwrap(model.rows.first { $0.right?.number == 5 })
+
+        XCTAssertTrue(model.canGoToMovedLine(source.id, .left))
+        model.goToMovedLine(source.id, .left)
+
+        XCTAssertEqual(model.currentRowID, target.id)
+        XCTAssertEqual(model.selectedDifferenceID, target.id)
+        XCTAssertEqual(model.activeSide, .right)
     }
 
     func testResetComparisonOptionsPersistsDefaults() throws {
@@ -920,6 +1296,238 @@ final class ComparisonModelTests: XCTestCase {
         XCTAssertEqual(model.right.text, "ア")
         XCTAssertEqual(model.summary.differences, 1)
         XCTAssertFalse(model.canUndo)
+    }
+
+    func testSessionStateRestoresFilesSelectionLayoutAndIndependentReadOnlySides() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "same\nleft\ntail\n")
+        let rightURL = try temporaryFile(name: "right.txt", content: "same\nright\ntail\n")
+        let source = ComparisonModel()
+        source.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(source)
+        source.selectFirstDifference()
+        source.activateSide(.right)
+        source.setEditable(false, on: .left)
+        source.setLocationPaneVisible(false)
+        source.setLocationPaneWidth(140)
+        let frame = try ComparisonSessionState.WindowFrame(
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600
+        )
+        let capturedState = try await source.sessionState(windowFrame: frame)
+        let state = try XCTUnwrap(capturedState)
+
+        let restored = ComparisonModel()
+        restored.restoreSession(state)
+        await waitUntilIdle(restored)
+
+        XCTAssertEqual(restored.left.url, leftURL)
+        XCTAssertEqual(restored.right.url, rightURL)
+        XCTAssertFalse(restored.left.isEditable)
+        XCTAssertTrue(restored.right.isEditable)
+        XCTAssertEqual(restored.activeSide, .right)
+        XCTAssertFalse(restored.isLocationPaneVisible)
+        XCTAssertEqual(restored.locationPaneWidth, 140)
+        XCTAssertEqual(restored.selectedDifferenceID, restored.rows[1].id)
+        XCTAssertFalse(restored.hasUnsavedChanges)
+    }
+
+    func testNonemptyScratchpadsRestoreAndRecaptureExactlyAcrossTwoLaunches() async throws {
+        let original = ComparisonModel()
+        original.createEmptyComparison()
+        original.editText("left\nnotes", on: .left)
+        original.editText("right\r\nnotes", on: .right)
+        let leftDestination = try temporaryFile(name: "left.txt", content: "")
+        let rightDestination = try temporaryFile(name: "right.txt", content: "")
+        await withCheckedContinuation { continuation in
+            original.saveAllChanges(
+                scratchpadDestinations: [.left: leftDestination, .right: rightDestination]
+            ) { _ in continuation.resume() }
+        }
+        await waitUntilIdle(original)
+        let capturedFirstState = try await original.sessionState(windowFrame: sessionFrame())
+        let firstState = try XCTUnwrap(capturedFirstState)
+
+        let firstRestore = ComparisonModel()
+        firstRestore.restoreSession(firstState)
+        await waitUntilIdle(firstRestore)
+        let capturedSecondState = try await firstRestore.sessionState(windowFrame: sessionFrame())
+        let secondState = try XCTUnwrap(capturedSecondState)
+
+        let secondRestore = ComparisonModel()
+        secondRestore.restoreSession(secondState)
+        await waitUntilIdle(secondRestore)
+        XCTAssertEqual(secondRestore.left.text, firstRestore.left.text)
+        XCTAssertEqual(secondRestore.right.text, firstRestore.right.text)
+        XCTAssertFalse(secondRestore.hasUnsavedChanges)
+    }
+
+    func testSessionStatePreservesExplicitLegacyEncoding() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "left")
+        let rightURL = try temporaryFile(
+            name: "right.txt",
+            data: Data([0x1B, 0x24, 0x42, 0x25, 0x24, 0x1B, 0x28, 0x42])
+        )
+        let source = ComparisonModel()
+        source.enqueueOpen(leftURL, into: .left)
+        source.load(rightURL, into: .right, assuming: .iso2022JP)
+        await waitUntilIdle(source)
+        let capturedState = try await source.sessionState(windowFrame: try sessionFrame())
+        let state = try XCTUnwrap(capturedState)
+        XCTAssertEqual(state.rightEncoding, .iso2022JP)
+
+        let restored = ComparisonModel()
+        restored.restoreSession(state)
+        await waitUntilIdle(restored)
+
+        XCTAssertEqual(restored.right.document?.encoding, .iso2022JP)
+        XCTAssertEqual(restored.right.text, source.right.text)
+    }
+
+    func testSessionRestoreDerivesCommentSyntaxFromRestoredFileURLs() async throws {
+        let leftURL = try temporaryFile(name: "left.c", content: "value // left\n")
+        let rightURL = try temporaryFile(name: "right.c", content: "value // right\n")
+        let state = try ComparisonSessionState(
+            left: .file(leftURL),
+            right: .file(rightURL),
+            windowFrame: try sessionFrame()
+        )
+        let model = ComparisonModel()
+        var options = model.options
+        options.ignoreComments = true
+        model.setOptions(options)
+
+        model.restoreSession(state)
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.summary.differences, 0)
+        XCTAssertEqual(model.rows.map(\.kind), [.unchanged])
+    }
+
+    func testFailedSessionRestoreDoesNotPartiallyPublishOneSide() async throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString)
+        let state = try ComparisonSessionState(
+            left: .scratchpad("left"),
+            right: .file(missing),
+            leftReadOnly: true,
+            rightReadOnly: true,
+            windowFrame: ComparisonSessionState.WindowFrame(
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 600
+            )
+        )
+        let model = ComparisonModel()
+
+        model.restoreSession(state)
+        await waitUntilIdle(model)
+
+        XCTAssertFalse(model.left.isLoaded)
+        XCTAssertFalse(model.right.isLoaded)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testSessionRestoreDiffFailureDoesNotPublishLoadedSides() async throws {
+        let tooManyLines = String(repeating: "\n", count: 1_048_577)
+        let state = try ComparisonSessionState(
+            left: .scratchpad(tooManyLines),
+            right: .scratchpad("right"),
+            windowFrame: try sessionFrame()
+        )
+        let model = ComparisonModel()
+        var result: SessionRestoreResult?
+
+        model.restoreSession(state) { result = $0 }
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertFalse(model.left.isLoaded)
+        XCTAssertFalse(model.right.isLoaded)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testExplicitOpenCancelsInFlightSessionRestoreWithoutPublishingSavedPeer() async throws {
+        let state = try ComparisonSessionState(
+            left: .scratchpad(String(repeating: "left\n", count: 500_000)),
+            right: .scratchpad("saved right"),
+            windowFrame: try sessionFrame()
+        )
+        let explicit = try temporaryFile(name: "explicit.txt", content: "explicit")
+        let model = ComparisonModel()
+        var results: [SessionRestoreResult] = []
+
+        model.restoreSession(state) { results.append($0) }
+        model.enqueueOpen(explicit, into: .left)
+        await waitUntilIdle(model)
+
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(results, [.cancelled])
+        XCTAssertEqual(model.left.url, explicit)
+        XCTAssertFalse(model.right.isLoaded)
+        XCTAssertEqual(model.left.text, "explicit")
+    }
+
+    func testSessionStateRejectsDirtyOrPartiallyLoadedModel() async throws {
+        let frame = try sessionFrame()
+        let model = ComparisonModel()
+        let emptyState = try await model.sessionState(windowFrame: frame)
+        XCTAssertNil(emptyState)
+
+        model.createEmptyComparison()
+        model.editText("dirty", on: .left)
+        let dirtyState = try await model.sessionState(windowFrame: frame)
+        XCTAssertNil(dirtyState)
+    }
+
+    func testSessionPersistenceLockBlocksEditsUntilReleased() async throws {
+        let leftURL = try temporaryFile(name: "left.txt", content: "left")
+        let rightURL = try temporaryFile(name: "right.txt", content: "right")
+        let model = ComparisonModel()
+        model.enqueueOpen([leftURL, rightURL])
+        await waitUntilIdle(model)
+
+        XCTAssertTrue(model.lockSessionPersistence())
+        model.editText("changed", on: .left)
+        XCTAssertEqual(model.left.text, "left")
+        XCTAssertFalse(model.canSetEditable(on: .left))
+
+        model.unlockSessionPersistence()
+        model.editText("changed", on: .left)
+        XCTAssertEqual(model.left.text, "changed")
+    }
+
+    func testExplicitOpenDoesNotFollowOldBookmarkResolution() async throws {
+        let suiteName = "MacMergeTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { userDefaults.removePersistentDomain(forName: suiteName) }
+        let original = try temporaryFile(name: "original.txt", content: "original")
+        let moved = try temporaryFile(name: "moved.txt", content: "moved")
+        let right = try temporaryFile(name: "right.txt", content: "right")
+        let bookmarkStore = SecurityScopedBookmarkStore(
+            userDefaults: userDefaults,
+            createBookmark: { _ in Data("bookmark".utf8) },
+            resolveBookmark: { _ in .init(url: moved, isStale: false) }
+        )
+        try bookmarkStore.persistAccess(to: original)
+        let model = ComparisonModel(bookmarkStore: bookmarkStore)
+
+        model.enqueueOpen([original, right])
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.left.url, original)
+        XCTAssertEqual(model.left.text, "original")
+    }
+
+    private func sessionFrame() throws -> ComparisonSessionState.WindowFrame {
+        try ComparisonSessionState.WindowFrame(
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600
+        )
     }
 
     private func waitUntilIdle(_ model: ComparisonModel) async {

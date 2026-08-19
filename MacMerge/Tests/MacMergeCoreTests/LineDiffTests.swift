@@ -90,7 +90,10 @@ final class LineDiffTests: XCTestCase {
         )
         XCTAssertTrue(sharedEquivalent.sharesTextStorage)
         XCTAssertFalse(nonsharedEquivalent.sharesTextStorage)
-        XCTAssertEqual(nonsharedEquivalent, sharedEquivalent)
+        XCTAssertTrue(sharedEquivalent.hasEqualSourceRecords)
+        XCTAssertFalse(nonsharedEquivalent.hasEqualSourceRecords)
+        XCTAssertNotEqual(nonsharedEquivalent, sharedEquivalent)
+        XCTAssertNotEqual(Set([nonsharedEquivalent]), Set([sharedEquivalent]))
     }
 
     func testReplacementProducesModifiedRow() throws {
@@ -2361,6 +2364,17 @@ final class LineDiffTests: XCTestCase {
         XCTAssertFalse(history.canUndo)
     }
 
+    func testComparisonHistoryPrunesRedundantCurrentBeforeCanUndoAndUndo() {
+        let original = ComparisonSnapshot(left: "original", right: "")
+        let edited = ComparisonSnapshot(left: "edited", right: "")
+        var history = ComparisonHistory(current: original)
+
+        XCTAssertTrue(history.commit(edited))
+        XCTAssertTrue(history.replaceCurrent(original))
+        XCTAssertFalse(history.canUndo)
+        XCTAssertNil(history.undo())
+    }
+
     func testComparisonHistoryBoundsUndoDepth() {
         var history = ComparisonHistory(
             current: ComparisonSnapshot(left: "0", right: "right"),
@@ -2449,19 +2463,127 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(result.count, 0)
     }
 
+    func testMovedBlocksAreOptInAndExtendAcrossDuplicateLines() throws {
+        let left = "head\nduplicate\nunique moved seed\nduplicate\nstable one\nstable two\nstable three\ntail"
+        let right = "head\nstable one\nstable two\nstable three\nduplicate\nunique moved seed\nduplicate\ntail"
+
+        let disabled = try LineDiff.compareResult(left: left, right: right)
+        XCTAssertTrue(disabled.movedLines.isEmpty)
+
+        let result = try LineDiff.compareResult(
+            left: left,
+            right: right,
+            options: LineDiffOptions(detectMovedBlocks: true)
+        )
+
+        XCTAssertEqual(result.rows, disabled.rows)
+        XCTAssertEqual(result.movedLines.leftToRightCount, 3)
+        XCTAssertEqual(result.movedLines.rightToLeftCount, 3)
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 2), 5)
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 3), 6)
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 4), 7)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 5), 2)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 6), 3)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 7), 4)
+        XCTAssertEqual(result.movedLines.shallowStorageBytes, 48)
+    }
+
+    func testMovedBlocksUseComparisonOptions() throws {
+        let result = try LineDiff.compareResult(
+            left: "head\nAlpha 100\nstable one\nstable two\nstable three\ntail",
+            right: "head\nstable one\nstable two\nstable three\nalpha 200\ntail",
+            options: LineDiffOptions(
+                ignoreCase: true,
+                ignoreNumbers: true,
+                detectMovedBlocks: true
+            )
+        )
+
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 2), 5)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 5), 2)
+    }
+
+    func testMovedBlocksUseCommentFiltering() throws {
+        let result = try LineDiff.compareResult(
+            left: "head\nmove /* left */ seed\nstable one\nstable two\nstable three\ntail",
+            right: "head\nstable one\nstable two\nstable three\nmove /* right */ seed\ntail",
+            options: LineDiffOptions(
+                ignoreComments: true,
+                detectMovedBlocks: true,
+                commentSyntax: .cFamily
+            )
+        )
+
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 2), 5)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 5), 2)
+    }
+
+    func testMovedBlocksUseSubstitutions() throws {
+        let result = try LineDiff.compareResult(
+            left: "head\nmove-left\nstable one\nstable two\nstable three\ntail",
+            right: "head\nstable one\nstable two\nstable three\nmove-right\ntail",
+            options: LineDiffOptions(
+                detectMovedBlocks: true,
+                substitutions: [
+                    SubstitutionRule(pattern: "(?:left|right)", replacement: "same")
+                ]
+            )
+        )
+
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 2), 5)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 5), 2)
+    }
+
+    func testMovedBlocksPreserveDirectionalMatchesForAmbiguousDuplicateLines() throws {
+        let result = try LineDiff.compareResult(
+            left: "root\nA\nX\nB\nstable 1\nstable 2\nstable 3\nstable 4\nstable 5\nstable 6\nstable 7\ntail",
+            right: "root\nstable 1\nstable 2\nstable 3\nA\nX\nstable 4\nstable 5\nstable 6\nX\nB\nstable 7\ntail",
+            options: LineDiffOptions(detectMovedBlocks: true)
+        )
+
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 2), 5)
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 3), 6)
+        XCTAssertEqual(result.movedLines.rightLine(forLeftLine: 4), 11)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 5), 2)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 6), 3)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 10), 3)
+        XCTAssertEqual(result.movedLines.leftLine(forRightLine: 11), 4)
+    }
+
+    func testXDiffWithMovesRejectsPopulatedMovedResults() {
+        var result = mmx_diff_result(hunks: nil, count: 0)
+        let sentinel = UnsafeMutablePointer<mmx_moved_line>(bitPattern: 1)
+        var moved = mmx_moved_result(
+            left_to_right: sentinel,
+            left_to_right_count: 1,
+            right_to_left: nil,
+            right_to_left_count: 0
+        )
+
+        let status = mmx_diff_with_moves(nil, 0, nil, 0, 0, &result, &moved)
+
+        XCTAssertEqual(status, -1)
+        XCTAssertEqual(moved.left_to_right, sentinel)
+        XCTAssertEqual(moved.left_to_right_count, 1)
+    }
+
     func testAlgorithmsProduceExpectedAlignmentForRepeatedLines() throws {
         let left = ["A", "B", "E", "B", "F", "B", "B", "C", "F", "B", "E", "E"]
             .joined(separator: "\n")
         let right = ["E", "D", "D", "D", "E", "B", "C", "B", "B", "F", "D", "E"]
             .joined(separator: "\n")
+        let algorithms: [DiffAlgorithm] = [.default, .minimal, .patience, .histogram, .none]
         let expectedUnchanged: [DiffAlgorithm: [DiffRow.ID]] = [
             .default: [id(3, 5), id(4, 6), id(6, 8), id(7, 9), id(9, 10), id(12, 12)],
+            .minimal: [id(3, 5), id(4, 6), id(6, 8), id(7, 9), id(9, 10), id(12, 12)],
             .patience: [id(3, 1), id(7, 6), id(8, 7), id(9, 10), id(12, 12)],
             .histogram: [id(3, 1), id(7, 6), id(8, 7), id(10, 8), id(12, 12)],
             .none: [id(6, 6), id(12, 12)]
         ]
 
-        for (algorithm, expected) in expectedUnchanged {
+        XCTAssertEqual(expectedUnchanged.count, algorithms.count)
+        for algorithm in algorithms {
+            let expected = try XCTUnwrap(expectedUnchanged[algorithm])
             let rows = try LineDiff.compare(
                 left: left,
                 right: right,
@@ -2581,6 +2703,56 @@ final class LineDiffTests: XCTestCase {
         }
     }
 
+    func testXDiffWithMovesRecoversFromEveryAllocationFailure() throws {
+        let left = "head\nduplicate\nunique moved seed\nduplicate\nstable one\nstable two\nstable three\ntail"
+        let right = "head\nstable one\nstable two\nstable three\nduplicate\nunique moved seed\nduplicate\ntail"
+        mmx_test_disable_allocation_failures()
+        let allocationCount = try successfulNativeDiffWithMoves(left: left, right: right)
+        XCTAssertGreaterThan(allocationCount, 0)
+        XCTAssertEqual(mmx_test_outstanding_allocation_count(), 0)
+
+        for failedAllocation in 0..<allocationCount {
+            mmx_test_fail_allocation_after(failedAllocation)
+            var result = mmx_diff_result(hunks: nil, count: 0)
+            var moved = mmx_moved_result(
+                left_to_right: nil,
+                left_to_right_count: 0,
+                right_to_left: nil,
+                right_to_left_count: 0
+            )
+            let status = withNativeBuffers(left: left, right: right) { leftBuffer, rightBuffer in
+                mmx_diff_with_moves(
+                    leftBuffer.baseAddress,
+                    leftBuffer.count,
+                    rightBuffer.baseAddress,
+                    rightBuffer.count,
+                    0,
+                    &result,
+                    &moved
+                )
+            }
+
+            XCTAssertNotEqual(status, 0, "Allocation \(failedAllocation)")
+            XCTAssertNil(result.hunks)
+            XCTAssertEqual(result.count, 0)
+            XCTAssertNil(moved.left_to_right)
+            XCTAssertEqual(moved.left_to_right_count, 0)
+            XCTAssertNil(moved.right_to_left)
+            XCTAssertEqual(moved.right_to_left_count, 0)
+            XCTAssertEqual(
+                mmx_test_outstanding_allocation_count(),
+                0,
+                "Allocation \(failedAllocation) leaked"
+            )
+            mmx_diff_result_free(&result)
+            mmx_moved_result_free(&moved)
+        }
+
+        mmx_test_disable_allocation_failures()
+        _ = try successfulNativeDiffWithMoves(left: left, right: right)
+        XCTAssertEqual(mmx_test_outstanding_allocation_count(), 0)
+    }
+
     private func successfulNativeDiff(left: String, right: String, flags: UInt64) throws -> Int {
         var result = mmx_diff_result(hunks: nil, count: 0)
         let status = withNativeBuffers(left: left, right: right) { leftBuffer, rightBuffer in
@@ -2595,6 +2767,32 @@ final class LineDiffTests: XCTestCase {
         }
         let allocationCount = Int(mmx_test_allocation_attempt_count())
         mmx_diff_result_free(&result)
+        XCTAssertEqual(status, 0)
+        return allocationCount
+    }
+
+    private func successfulNativeDiffWithMoves(left: String, right: String) throws -> Int {
+        var result = mmx_diff_result(hunks: nil, count: 0)
+        var moved = mmx_moved_result(
+            left_to_right: nil,
+            left_to_right_count: 0,
+            right_to_left: nil,
+            right_to_left_count: 0
+        )
+        let status = withNativeBuffers(left: left, right: right) { leftBuffer, rightBuffer in
+            mmx_diff_with_moves(
+                leftBuffer.baseAddress,
+                leftBuffer.count,
+                rightBuffer.baseAddress,
+                rightBuffer.count,
+                0,
+                &result,
+                &moved
+            )
+        }
+        let allocationCount = Int(mmx_test_allocation_attempt_count())
+        mmx_diff_result_free(&result)
+        mmx_moved_result_free(&moved)
         XCTAssertEqual(status, 0)
         return allocationCount
     }

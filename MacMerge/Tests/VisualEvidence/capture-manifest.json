@@ -1,0 +1,49 @@
+{
+  "bundleIdentifier": "io.github.egigoka.MacMerge.AXProbe",
+  "capturedAt": "2026-08-17",
+  "executableSHA256": "809020288d295fb3c93e44f3714e966bf0993de199f47e073200138839d9b220",
+  "locationPaneSourceSHA256": "f4b431dc3a9ccdb4c4245a250af7e310a0ecb864594b55fc28e0e4094ed92adb",
+  "sourceRevision": "3b16e57ab39319e3e305ee4386577541a75cb0b6",
+  "captures": [
+    {
+      "accessibilityContrast": "increased",
+      "appearance": "light",
+      "file": "location-pane-increased-contrast.png",
+      "height": 720,
+      "pngSHA256": "48369667f4f4bc9fb829ddd5f14eca6a17c44e33296f291853ce9fc5146b9a2f",
+      "axSidecar": "location-pane-increased-contrast.ax.json",
+      "axSidecarSHA256": "73a616bcf6197863aeb32732f683b7cc8e7ff20fdb5f03deeac2e44c314ad138",
+      "locationSliders": [
+        {
+          "enabled": true,
+          "label": "Left file location map"
+        },
+        {
+          "enabled": true,
+          "label": "Right file location map"
+        }
+      ],
+      "width": 841
+    },
+    {
+      "accessibilityContrast": "normal",
+      "appearance": "dark",
+      "file": "location-pane-dark.png",
+      "height": 720,
+      "pngSHA256": "29502caa92c2f70ee9d6284188f20bf1c905262093b85551426a4cf08c95e24b",
+      "axSidecar": "location-pane-dark.ax.json",
+      "axSidecarSHA256": "73a616bcf6197863aeb32732f683b7cc8e7ff20fdb5f03deeac2e44c314ad138",
+      "locationSliders": [
+        {
+          "enabled": true,
+          "label": "Left file location map"
+        },
+        {
+          "enabled": true,
+          "label": "Right file location map"
+        }
+      ],
+      "width": 841
+    }
+  ]
+}

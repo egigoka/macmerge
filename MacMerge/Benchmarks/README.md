@@ -14,7 +14,7 @@ Repeat runs or select sizes with:
 swift run -c release MacMergeBenchmark --iterations 3 --lines 100000,1000000
 ```
 
-Exercise all rows as differences with `--density dense`. Packaged harnesses accept the same mode through `FIXTURE_DENSITY=dense`.
+Exercise all rows as differences with `--density dense`. Exercise the Location Pane's worst-case changed-run count with alternating changed and unchanged rows through `--density location-dense`. Packaged harnesses accept both modes through `FIXTURE_DENSITY`.
 
 Exercise long lines by setting their minimum UTF-8 payload size:
 
@@ -39,7 +39,9 @@ Run packaged-app load, first-visible-row, bottom-scroll, and resident-memory bud
 Scripts/run-performance-budgets.sh
 ```
 
-Defaults exercise 1,000,000 rows per side and enforce 5,000 ms load, 5,000 ms comparison, 1,500 ms first render, 1,500 ms bottom scroll, and 900 MiB resident memory. Override any threshold with `LOAD_BUDGET_MS`, `COMPARISON_BUDGET_MS`, `FIRST_RENDER_BUDGET_MS`, `SCROLL_BUDGET_MS`, or `RESIDENT_BUDGET_MIB`. The harness enables self-scroll only through `MACMERGE_PERFORMANCE_AUTOSCROLL`; normal launches are unchanged.
+Defaults exercise 1,000,000 rows per side and enforce 5,000 ms load, 5,000 ms comparison, 1,500 ms first render, 1,500 ms Location Pane render, 1,500 ms bottom scroll, and 900 MiB resident memory. Override any threshold with `LOAD_BUDGET_MS`, `COMPARISON_BUDGET_MS`, `FIRST_RENDER_BUDGET_MS`, `LOCATION_PANE_BUDGET_MS`, `SCROLL_BUDGET_MS`, or `RESIDENT_BUDGET_MIB`. The harness enables self-scroll only through `MACMERGE_PERFORMANCE_AUTOSCROLL`; normal launches are unchanged.
+
+Every packaged budget run forces the Location Pane visible and rejects reports unless its current nonempty map rendered within budget, raw resident-memory sampling succeeded, fixture and budget inputs match, and machine/OS provenance is present. CI additionally gates a 250,000-line alternating changed/unchanged fixture with `FIXTURE_DENSITY=location-dense`, 125,000 Location Map runs, and a 450 MiB resident ceiling. Each retained budget JSON report has a matching `.sha256` sidecar.
 
 Capture the same workflow with Instruments and `LoadPair`, `Comparison`, `FirstVisibleRow`, and `AutoScroll` signposts:
 

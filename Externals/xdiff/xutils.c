@@ -203,17 +203,22 @@ static int ends_with_optional_cr(const char *l, long s, long i)
 		return 1;
 	return 0;
 }
+static inline unsigned char ascii_tolower(unsigned char ch)
+{
+	if (ch >= 'A' && ch <= 'Z')
+		return ch + ('a' - 'A');
+	return ch;
+}
 static inline int match_a_byte(char ch1, char ch2, long flags)
 {
-	if (ch1 == ch2)
+	unsigned char byte1 = (unsigned char) ch1;
+	unsigned char byte2 = (unsigned char) ch2;
+
+	if (byte1 == byte2)
 		return 1;
-	if (!(flags & XDF_IGNORE_CASE) || ((ch1 | ch2) & 0x80))
+	if (!(flags & XDF_IGNORE_CASE) || ((byte1 | byte2) & 0x80))
 		return 0;
-	if (isupper(ch1))
-		ch1 = tolower(ch1);
-	if (isupper(ch2))
-		ch2 = tolower(ch2);
-	return (ch1 == ch2);
+	return ascii_tolower(byte1) == ascii_tolower(byte2);
 }
 
 int xdl_recmatch(const char *l1, long s1, const char *l2, long s2, long flags)
@@ -368,9 +373,9 @@ int xdl_recmatch(const char *l1, long s1, const char *l2, long s2, long flags)
 
 static inline unsigned long hash_a_byte(const char ch_, long flags)
 {
-	unsigned long ch = ch_ & 0xFF;
-	if ((flags & XDF_IGNORE_CASE) && !(ch & 0x80) && isupper(ch))
-		ch = tolower(ch);
+	unsigned long ch = (unsigned char) ch_;
+	if ((flags & XDF_IGNORE_CASE) && !(ch & 0x80))
+		ch = ascii_tolower((unsigned char) ch);
 	return ch;
 }
 

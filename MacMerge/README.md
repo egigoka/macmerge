@@ -37,6 +37,8 @@ Native macOS port of WinMerge, started as an isolated Swift package so existing 
 - Accept initial and subsequent Finder Open With requests
 
 See [todo.md](../todo.md) for the port roadmap and current work order.
+See [MIGRATION.md](MIGRATION.md) before moving a workflow from WinMerge and for the current feature-parity matrix.
+See [PRIVACY.md](PRIVACY.md) for local file, settings, bookmark, and crash-diagnostic handling.
 
 ## Run
 
@@ -56,7 +58,21 @@ Scripts/package-app.sh
 open dist/MacMerge.app
 ```
 
-Set `SIGN_IDENTITY`, `MARKETING_VERSION`, and `BUILD_NUMBER` to create a Developer ID-signed release candidate. Notarization and sandbox entitlements remain release-engineering work.
+Packaged applications enable App Sandbox with user-selected read/write access and persistent app-scoped security bookmarks. Set `SIGN_IDENTITY`, `MARKETING_VERSION`, and `BUILD_NUMBER` to create a Developer ID-signed release candidate. Use the release flow below for notarization.
+
+Create a notarized release archive after storing Apple credentials in a `notarytool` Keychain profile:
+
+```bash
+cd MacMerge
+xcrun notarytool store-credentials MacMergeNotary
+SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+NOTARYTOOL_PROFILE=MacMergeNotary \
+MARKETING_VERSION=0.1.0 \
+BUILD_NUMBER=1 \
+Scripts/release-app.sh
+```
+
+The release script requires a real Developer ID Application identity, waits for notarization, staples and validates the ticket, runs Gatekeeper assessment, and writes a SHA-256 file beside the versioned ZIP. Supported-version runtime testing remains a separate release gate.
 
 ## Port direction
 
