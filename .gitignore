@@ -135,6 +135,7 @@ Src/dlldata.c
 unittest-cppcheck-build-dir/
 MacMerge/.build/
 MacMerge/.swiftpm/
+MacMerge/lane*-build/
 MacMerge/dist/
 Src/FilterEngine/FilterLexer.cpp
 Src/FilterEngine/FilterParser.c
