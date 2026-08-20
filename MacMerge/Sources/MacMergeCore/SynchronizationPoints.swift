@@ -14,6 +14,8 @@ public enum SynchronizationPointsError: Error, Equatable, LocalizedError, Sendab
     case invalidEditRange(side: SynchronizationPointSide, lowerBound: Int, upperBound: Int)
     case invalidInsertedLineCount(Int)
     case sourceLineOverflow(side: SynchronizationPointSide)
+    case persistenceDataTooLarge(maximumBytes: Int)
+    case unsupportedPersistenceSchemaVersion(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -41,6 +43,10 @@ public enum SynchronizationPointsError: Error, Equatable, LocalizedError, Sendab
             "Inserted source-line count must be between 0 and \(SynchronizationPoints.maximumLineCount): \(count)."
         case .sourceLineOverflow(let side):
             "The \(side.description) source-line edit exceeds the supported line-number range."
+        case .persistenceDataTooLarge(let maximumBytes):
+            "Synchronization-point persistence data exceeds the \(maximumBytes)-byte limit."
+        case .unsupportedPersistenceSchemaVersion(let version):
+            "Unsupported synchronization-point persistence schema version: \(version)."
         }
     }
 }
@@ -169,6 +175,110 @@ public struct SynchronizationPoints: Codable, Equatable, Sendable {
     public static let maximumLineCount = Int(MMX_MAX_LINE_COUNT)
     static let maximumAnchorCount = 65_536
 
+    /// Bounded, versioned data for restoring synchronization points with their source bounds.
+    public struct PersistencePayload: Equatable, Sendable {
+        public static let currentSchemaVersion = 1
+        public static let maximumEncodedBytes = 4 * 1024 * 1024
+
+        public let schemaVersion: Int
+        public let leftLineCount: Int
+        public let rightLineCount: Int
+        public let synchronizationPoints: SynchronizationPoints
+
+        public var anchors: [SynchronizationPoint] { synchronizationPoints.anchors }
+
+        public init(
+            synchronizationPoints: SynchronizationPoints,
+            leftLineCount: Int,
+            rightLineCount: Int
+        ) throws {
+            try synchronizationPoints.validate(
+                leftLineCount: leftLineCount,
+                rightLineCount: rightLineCount
+            )
+            schemaVersion = Self.currentSchemaVersion
+            self.leftLineCount = leftLineCount
+            self.rightLineCount = rightLineCount
+            self.synchronizationPoints = synchronizationPoints
+        }
+
+        /// Returns compact JSON with recursively sorted object keys.
+        public func encodedData() throws -> Data {
+            try synchronizationPoints.validate(
+                leftLineCount: leftLineCount,
+                rightLineCount: rightLineCount
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let data = try encoder.encode(WirePayload(self))
+            guard data.count <= Self.maximumEncodedBytes else {
+                throw SynchronizationPointsError.persistenceDataTooLarge(
+                    maximumBytes: Self.maximumEncodedBytes
+                )
+            }
+            return data
+        }
+
+        public static func decode(from data: Data) throws -> PersistencePayload {
+            guard data.count <= maximumEncodedBytes else {
+                throw SynchronizationPointsError.persistenceDataTooLarge(
+                    maximumBytes: maximumEncodedBytes
+                )
+            }
+            return try JSONDecoder().decode(WirePayload.self, from: data).decodedPayload()
+        }
+
+        private struct WirePayload: Codable {
+            let schemaVersion: Int
+            let leftLineCount: Int
+            let rightLineCount: Int
+            let synchronizationPoints: SynchronizationPoints
+
+            private enum CodingKeys: String, CodingKey {
+                case schemaVersion
+                case leftLineCount
+                case rightLineCount
+                case synchronizationPoints
+            }
+
+            init(_ payload: PersistencePayload) {
+                schemaVersion = payload.schemaVersion
+                leftLineCount = payload.leftLineCount
+                rightLineCount = payload.rightLineCount
+                synchronizationPoints = payload.synchronizationPoints
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+                guard schemaVersion == PersistencePayload.currentSchemaVersion else {
+                    throw SynchronizationPointsError.unsupportedPersistenceSchemaVersion(
+                        schemaVersion
+                    )
+                }
+                leftLineCount = try container.decode(Int.self, forKey: .leftLineCount)
+                rightLineCount = try container.decode(Int.self, forKey: .rightLineCount)
+                synchronizationPoints = try container.decode(
+                    SynchronizationPoints.self,
+                    forKey: .synchronizationPoints
+                )
+            }
+
+            func decodedPayload() throws -> PersistencePayload {
+                guard schemaVersion == PersistencePayload.currentSchemaVersion else {
+                    throw SynchronizationPointsError.unsupportedPersistenceSchemaVersion(
+                        schemaVersion
+                    )
+                }
+                return try PersistencePayload(
+                    synchronizationPoints: synchronizationPoints,
+                    leftLineCount: leftLineCount,
+                    rightLineCount: rightLineCount
+                )
+            }
+        }
+    }
+
     public private(set) var anchors: [SynchronizationPoint]
 
     public var count: Int { anchors.count }
@@ -200,6 +310,15 @@ public struct SynchronizationPoints: Codable, Equatable, Sendable {
             rightLineCount: rightLineCount
         )
         self.anchors = anchors
+    }
+
+    public func validate(leftLineCount: Int, rightLineCount: Int) throws {
+        try SynchronizationPoint.validateLineCounts(left: leftLineCount, right: rightLineCount)
+        try Self.validateBounds(
+            of: anchors,
+            leftLineCount: leftLineCount,
+            rightLineCount: rightLineCount
+        )
     }
 
     /// Adds an anchor in left-source order. An existing identical anchor is unchanged.

@@ -1706,7 +1706,7 @@ private extension TextFileEncoding {
     var isLegacy: Bool {
         switch self {
         case .shiftJIS, .japaneseEUC, .iso2022JP, .windows1250, .windows1251, .windows1252,
-             .windows1253, .windows1254:
+             .windows1253, .windows1254, .windows1255:
             true
         case .utf8, .utf16LittleEndian, .utf16BigEndian:
             false

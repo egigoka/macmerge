@@ -46,6 +46,12 @@ public enum DirectoryComparisonStatus: Int, CaseIterable, Hashable, Sendable {
     case error
 }
 
+public enum DirectoryRenameApplicationError: Error, Equatable, Sendable {
+    case duplicateMatch(side: FolderComparisonSide, relativePath: String)
+    case staleMatch(side: FolderComparisonSide, relativePath: String)
+    case pathCollision(side: FolderComparisonSide, relativePath: String)
+}
+
 public struct DirectoryFilePair: Equatable, Sendable {
     enum OpenSide: Equatable, Sendable {
         case left
@@ -604,6 +610,117 @@ public struct DirectoryResults: Equatable, Sendable {
         }
         self.results = results
         selectedIDs = replacementSelection
+    }
+
+    /// Atomically replaces matched one-sided regular files with paired identical-file rows.
+    /// Match order does not affect result order; each pair replaces its earlier source row.
+    public mutating func applyRenamedFileMatches(
+        _ matches: [RenamedFileMatch]
+    ) throws {
+        guard !matches.isEmpty else { return }
+
+        let orderedMatches = matches.sorted { left, right in
+            if left.left.relativePath != right.left.relativePath {
+                return left.left.relativePath.utf8.lexicographicallyPrecedes(
+                    right.left.relativePath.utf8
+                )
+            }
+            return left.right.relativePath.utf8.lexicographicallyPrecedes(
+                right.right.relativePath.utf8
+            )
+        }
+        var matchedLeftPaths: Set<String> = []
+        var matchedRightPaths: Set<String> = []
+        for match in orderedMatches {
+            guard matchedLeftPaths.insert(match.left.relativePath).inserted else {
+                throw DirectoryRenameApplicationError.duplicateMatch(
+                    side: .left,
+                    relativePath: match.left.relativePath
+                )
+            }
+            guard matchedRightPaths.insert(match.right.relativePath).inserted else {
+                throw DirectoryRenameApplicationError.duplicateMatch(
+                    side: .right,
+                    relativePath: match.right.relativePath
+                )
+            }
+        }
+
+        var leftIndicesByPath: [String: [Int]] = [:]
+        var rightIndicesByPath: [String: [Int]] = [:]
+        for (index, result) in results.enumerated() {
+            if let path = result.left?.relativePath, matchedLeftPaths.contains(path) {
+                leftIndicesByPath[path, default: []].append(index)
+            }
+            if let path = result.right?.relativePath, matchedRightPaths.contains(path) {
+                rightIndicesByPath[path, default: []].append(index)
+            }
+        }
+
+        var removedIndices: Set<Int> = []
+        var replacementsByIndex: [Int: DirectoryResult] = [:]
+        for match in orderedMatches {
+            let leftPath = match.left.relativePath
+            let rightPath = match.right.relativePath
+            let leftIndices = leftIndicesByPath[leftPath] ?? []
+            let rightIndices = rightIndicesByPath[rightPath] ?? []
+            guard leftIndices.count <= 1 else {
+                throw DirectoryRenameApplicationError.pathCollision(
+                    side: .left,
+                    relativePath: leftPath
+                )
+            }
+            guard rightIndices.count <= 1 else {
+                throw DirectoryRenameApplicationError.pathCollision(
+                    side: .right,
+                    relativePath: rightPath
+                )
+            }
+            guard let leftIndex = leftIndices.first,
+                let left = results[leftIndex].left,
+                results[leftIndex].status == .leftOnly,
+                results[leftIndex].right == nil,
+                left.kind == .file,
+                left.byteCount == match.left.size
+            else {
+                throw DirectoryRenameApplicationError.staleMatch(
+                    side: .left,
+                    relativePath: leftPath
+                )
+            }
+            guard let rightIndex = rightIndices.first,
+                let right = results[rightIndex].right,
+                results[rightIndex].status == .rightOnly,
+                results[rightIndex].left == nil,
+                right.kind == .file,
+                right.byteCount == match.right.size
+            else {
+                throw DirectoryRenameApplicationError.staleMatch(
+                    side: .right,
+                    relativePath: rightPath
+                )
+            }
+
+            let replacementIndex = min(leftIndex, rightIndex)
+            removedIndices.insert(leftIndex)
+            removedIndices.insert(rightIndex)
+            replacementsByIndex[replacementIndex] = DirectoryResult(
+                left: left,
+                right: right,
+                status: .identical
+            )
+        }
+
+        var updatedResults: [DirectoryResult] = []
+        updatedResults.reserveCapacity(results.count - matches.count)
+        for (index, result) in results.enumerated() {
+            if let replacement = replacementsByIndex[index] {
+                updatedResults.append(replacement)
+            } else if !removedIndices.contains(index) {
+                updatedResults.append(result)
+            }
+        }
+        replaceResults(updatedResults)
     }
 
     public mutating func setSelection(_ ids: Set<DirectoryResult.ID>) {

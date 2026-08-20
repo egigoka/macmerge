@@ -567,12 +567,46 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
         let (directoryFD, name) = try openParentDirectory(of: url)
         defer { Darwin.close(directoryFD) }
         let pinnedDirectoryIdentity = try directoryIdentity(directoryFD, path: url.path)
+        let destinationIdentity: FileIdentity?
         do {
-            guard try fileIdentity(directoryFD: directoryFD, name: name) == nil else {
-                throw ComparisonProjectError.replacementDisabled(url.path)
-            }
+            destinationIdentity = try fileIdentity(directoryFD: directoryFD, name: name)
         } catch ComparisonProjectError.invalidProjectFileURL {
             throw ComparisonProjectError.replacementDisabled(url.path)
+        }
+        let destinationFD: Int32?
+        let destinationData: Data?
+        if let destinationIdentity {
+            let descriptor = name.withCString {
+                Darwin.openat(directoryFD, $0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+            }
+            guard descriptor >= 0 else {
+                if (try? fileIdentity(directoryFD: directoryFD, name: name)) == destinationIdentity {
+                    throw ComparisonProjectError.replacementDisabled(url.path)
+                }
+                throw ComparisonProjectError.changedOnDisk
+            }
+            do {
+                guard try descriptorIdentity(descriptor, path: url.path) == destinationIdentity,
+                    try fileIdentity(directoryFD: directoryFD, name: name) == destinationIdentity
+                else {
+                    throw ComparisonProjectError.changedOnDisk
+                }
+                destinationData = try readData(
+                    descriptor: descriptor,
+                    expectedIdentity: destinationIdentity,
+                    path: url.path
+                )
+            } catch {
+                Darwin.close(descriptor)
+                throw error
+            }
+            destinationFD = descriptor
+        } else {
+            destinationFD = nil
+            destinationData = nil
+        }
+        defer {
+            if let destinationFD { Darwin.close(destinationFD) }
         }
         let stagedName = ".macmerge-project-\(UUID().uuidString).tmp"
         let stagedFD = stagedName.withCString {
@@ -602,6 +636,37 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
                 offset += written
             }
         }
+        if let destinationFD, let destinationIdentity {
+            do {
+                guard try descriptorIdentity(destinationFD, path: url.path) == destinationIdentity,
+                    try fileIdentity(directoryFD: directoryFD, name: name) == destinationIdentity
+                else {
+                    throw ComparisonProjectError.changedOnDisk
+                }
+                guard Darwin.fcopyfile(
+                    destinationFD,
+                    stagedFD,
+                    nil,
+                    copyfile_flags_t(COPYFILE_METADATA)
+                ) == 0,
+                    Darwin.fchmod(stagedFD, destinationIdentity.mode & mode_t(0o7777)) == 0
+                else {
+                    throw ComparisonProjectError.replacementDisabled(url.path)
+                }
+                guard try descriptorIdentity(stagedFD, path: url.path).hasMetadataCopied(
+                    from: destinationIdentity
+                ),
+                    try descriptorIdentity(destinationFD, path: url.path) == destinationIdentity,
+                    try fileIdentity(directoryFD: directoryFD, name: name) == destinationIdentity
+                else {
+                    throw ComparisonProjectError.changedOnDisk
+                }
+            } catch ComparisonProjectError.changedOnDisk {
+                throw ComparisonProjectError.changedOnDisk
+            } catch {
+                throw ComparisonProjectError.replacementDisabled(url.path)
+            }
+        }
         try fullySynchronize(stagedFD)
         let writtenIdentity = try descriptorIdentity(stagedFD, path: url.path)
         guard writtenIdentity.device == stagedIdentity.device,
@@ -609,12 +674,15 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
             writtenIdentity.links == 1,
             writtenIdentity.size == off_t(data.count),
             try fileIdentity(directoryFD: directoryFD, name: stagedName) == writtenIdentity,
-            try fileIdentity(directoryFD: directoryFD, name: name) == nil
+            try fileIdentity(directoryFD: directoryFD, name: name) == destinationIdentity
         else {
             throw ComparisonProjectError.changedOnDisk
         }
         try beforeExclusiveRename?()
         do {
+            let currentDestinationIdentity = try destinationFD.map {
+                try descriptorIdentity($0, path: url.path)
+            }
             guard
                 try descriptorContains(
                     data,
@@ -623,7 +691,15 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
                     path: url.path
                 ),
                 try fileIdentity(directoryFD: directoryFD, name: stagedName) == writtenIdentity,
-                try fileIdentity(directoryFD: directoryFD, name: name) == nil
+                try fileIdentity(directoryFD: directoryFD, name: name) == destinationIdentity,
+                currentDestinationIdentity == destinationIdentity,
+                try directoryIdentity(directoryFD, path: url.path) == pinnedDirectoryIdentity,
+                try requestedPathMatches(
+                    url,
+                    name: name,
+                    directoryIdentity: pinnedDirectoryIdentity,
+                    fileIdentity: destinationIdentity
+                )
             else {
                 throw ComparisonProjectError.changedOnDisk
             }
@@ -632,27 +708,42 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
         }
         let renamed = stagedName.withCString { stagedPath in
             name.withCString { targetPath in
-                Darwin.renameatx_np(directoryFD, stagedPath, directoryFD, targetPath, UInt32(RENAME_EXCL))
+                Darwin.renameatx_np(
+                    directoryFD,
+                    stagedPath,
+                    directoryFD,
+                    targetPath,
+                    UInt32(destinationIdentity == nil ? RENAME_EXCL : RENAME_SWAP)
+                )
             }
         }
         guard renamed == 0 else {
-            if errno == EEXIST { throw ComparisonProjectError.changedOnDisk }
+            if errno == EEXIST || errno == ENOENT || errno == EISDIR || errno == ENOTDIR {
+                throw ComparisonProjectError.changedOnDisk
+            }
             throw currentPOSIXError()
         }
 
         do {
             let publishedIdentity = try descriptorIdentity(stagedFD, path: url.path)
+            let currentDestinationIdentity = try destinationFD.map {
+                try descriptorIdentity($0, path: url.path)
+            }
             guard publishedIdentity.device == writtenIdentity.device,
                 publishedIdentity.inode == writtenIdentity.inode,
                 publishedIdentity.links == 1,
                 publishedIdentity.size == writtenIdentity.size,
                 try fileIdentity(directoryFD: directoryFD, name: name) == publishedIdentity,
-                try fileIdentity(directoryFD: directoryFD, name: stagedName) == nil
+                try fileIdentity(directoryFD: directoryFD, name: stagedName) == destinationIdentity,
+                currentDestinationIdentity == destinationIdentity
             else {
                 throw ComparisonProjectError.saveOutcomeUncertain(url.path)
             }
             try afterInitialPublishValidation?()
             try fullySynchronize(directoryFD)
+            let synchronizedDestinationIdentity = try destinationFD.map {
+                try descriptorIdentity($0, path: url.path)
+            }
             guard
                 try descriptorContains(
                     data,
@@ -661,17 +752,36 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
                     path: url.path
                 ),
                 try fileIdentity(directoryFD: directoryFD, name: name) == publishedIdentity,
+                try fileIdentity(directoryFD: directoryFD, name: stagedName) == destinationIdentity,
+                synchronizedDestinationIdentity == destinationIdentity,
                 try directoryIdentity(directoryFD, path: url.path) == pinnedDirectoryIdentity
             else {
                 throw ComparisonProjectError.saveOutcomeUncertain(url.path)
             }
-            let (requestedDirectoryFD, requestedName) = try openParentDirectory(of: url)
-            defer { Darwin.close(requestedDirectoryFD) }
-            guard requestedName == name,
-                try directoryIdentity(requestedDirectoryFD, path: url.path) == pinnedDirectoryIdentity,
-                try fileIdentity(directoryFD: requestedDirectoryFD, name: requestedName) == publishedIdentity
+            guard try requestedPathMatches(
+                url,
+                name: name,
+                directoryIdentity: pinnedDirectoryIdentity,
+                fileIdentity: publishedIdentity
+            )
             else {
                 throw ComparisonProjectError.saveOutcomeUncertain(url.path)
+            }
+            if let destinationFD, let destinationIdentity, let destinationData {
+                guard try descriptorContains(
+                    destinationData,
+                    descriptor: destinationFD,
+                    expectedIdentity: destinationIdentity,
+                    path: url.path
+                ),
+                    try fileIdentity(directoryFD: directoryFD, name: stagedName) == destinationIdentity
+                else {
+                    throw ComparisonProjectError.saveOutcomeUncertain(url.path)
+                }
+                let removed = stagedName.withCString { Darwin.unlinkat(directoryFD, $0, 0) }
+                guard removed == 0 else {
+                    throw ComparisonProjectError.saveOutcomeUncertain(url.path)
+                }
             }
         } catch {
             guard let publishedIdentity = try? descriptorIdentity(stagedFD, path: url.path),
@@ -679,7 +789,8 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
                 publishedIdentity.inode == writtenIdentity.inode,
                 publishedIdentity.size == writtenIdentity.size,
                 (try? fileIdentity(directoryFD: directoryFD, name: name)) == publishedIdentity,
-                (try? fileIdentity(directoryFD: directoryFD, name: stagedName)) == nil
+                (try? fileIdentity(directoryFD: directoryFD, name: stagedName)) == destinationIdentity,
+                (try? destinationFD.map { try descriptorIdentity($0, path: url.path) }) == destinationIdentity
             else {
                 throw ComparisonProjectError.saveOutcomeUncertain(url.path)
             }
@@ -690,6 +801,24 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
             }
             throw ComparisonProjectError.saveOutcomeUncertain(url.path)
         }
+    }
+
+    private static func requestedPathMatches(
+        _ url: URL,
+        name: String,
+        directoryIdentity expectedDirectoryIdentity: DirectoryIdentity,
+        fileIdentity expectedFileIdentity: FileIdentity?
+    ) throws -> Bool {
+        let (requestedDirectoryFD, requestedName) = try openParentDirectory(of: url)
+        defer { Darwin.close(requestedDirectoryFD) }
+        guard requestedName == name else { return false }
+        let currentDirectoryIdentity = try directoryIdentity(requestedDirectoryFD, path: url.path)
+        guard currentDirectoryIdentity == expectedDirectoryIdentity else { return false }
+        let currentFileIdentity = try fileIdentity(
+            directoryFD: requestedDirectoryFD,
+            name: requestedName
+        )
+        return currentFileIdentity == expectedFileIdentity
     }
 
     private static func descriptorContains(
@@ -726,6 +855,42 @@ public struct ComparisonProject: Codable, Equatable, Sendable {
             try descriptorIdentity(descriptor, path: path) == initialIdentity
         else { return false }
         return true
+    }
+
+    private static func readData(
+        descriptor: Int32,
+        expectedIdentity: FileIdentity,
+        path: String
+    ) throws -> Data {
+        guard expectedIdentity.size >= 0,
+            expectedIdentity.size <= off_t(maximumFileSize),
+            try descriptorIdentity(descriptor, path: path) == expectedIdentity
+        else {
+            throw ComparisonProjectError.replacementDisabled(path)
+        }
+        var data = Data(count: Int(expectedIdentity.size))
+        let readComplete = data.withUnsafeMutableBytes { buffer -> Bool in
+            guard let baseAddress = buffer.baseAddress else { return true }
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.pread(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    buffer.count - offset,
+                    off_t(offset)
+                )
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { return false }
+                offset += count
+            }
+            return true
+        }
+        guard readComplete,
+            try descriptorIdentity(descriptor, path: path) == expectedIdentity
+        else {
+            throw ComparisonProjectError.changedOnDisk
+        }
+        return data
     }
 
     private static func fileIdentity(directoryFD: Int32, name: String) throws -> FileIdentity? {
@@ -910,6 +1075,13 @@ private struct FileIdentity: Equatable {
         modifiedNanoseconds = information.st_mtimespec.tv_nsec
         changedSeconds = information.st_ctimespec.tv_sec
         changedNanoseconds = information.st_ctimespec.tv_nsec
+    }
+
+    func hasMetadataCopied(from source: FileIdentity) -> Bool {
+        mode & mode_t(0o7777) == source.mode & mode_t(0o7777)
+            && owner == source.owner
+            && group == source.group
+            && flags == source.flags
     }
 }
 

@@ -48,6 +48,7 @@ public struct ComparisonSessionState: Equatable, Sendable {
         case windows1252
         case windows1253
         case windows1254
+        case windows1255
     }
 
     public enum SplitOrientation: String, CaseIterable, Sendable {

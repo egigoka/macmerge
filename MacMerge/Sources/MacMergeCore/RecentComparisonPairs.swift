@@ -25,7 +25,7 @@ public struct RecentComparisonPair: Codable, Equatable, Hashable, Sendable {
     public let right: URL
     public let kind: Kind
 
-    public init(left: URL, right: URL, kind: Kind) throws {
+    public init(left: URL, right: URL, kind: Kind = .file) throws {
         self.left = try Self.canonicalURL(left, kind: kind)
         self.right = try Self.canonicalURL(right, kind: kind)
         self.kind = kind
@@ -41,7 +41,12 @@ public struct RecentComparisonPair: Codable, Equatable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let left = try container.decode(URL.self, forKey: .left)
         let right = try container.decode(URL.self, forKey: .right)
-        let kind = try container.decode(Kind.self, forKey: .kind)
+        let kind: Kind
+        if container.contains(.kind) {
+            kind = try container.decode(Kind.self, forKey: .kind)
+        } else {
+            kind = .file
+        }
 
         do {
             try self.init(left: left, right: right, kind: kind)
@@ -133,7 +138,11 @@ public struct RecentComparisonPairs: Codable, Equatable, Sendable, RandomAccessC
     }
 
     @discardableResult
-    public mutating func record(left: URL, right: URL, kind: RecentComparisonPair.Kind) throws -> Bool {
+    public mutating func record(
+        left: URL,
+        right: URL,
+        kind: RecentComparisonPair.Kind = .file
+    ) throws -> Bool {
         try record(RecentComparisonPair(left: left, right: right, kind: kind))
     }
 
@@ -148,7 +157,7 @@ public struct RecentComparisonPairs: Codable, Equatable, Sendable, RandomAccessC
     public mutating func remove(
         left: URL,
         right: URL,
-        kind: RecentComparisonPair.Kind
+        kind: RecentComparisonPair.Kind = .file
     ) throws -> Bool {
         try remove(RecentComparisonPair(left: left, right: right, kind: kind))
     }

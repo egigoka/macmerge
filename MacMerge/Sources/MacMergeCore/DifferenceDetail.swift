@@ -204,6 +204,83 @@ public struct DifferenceDetailSide: Equatable, Sendable {
     }
 }
 
+public enum DifferenceDetailMergeDirection: Equatable, Sendable {
+    case leftToRight
+    case rightToLeft
+}
+
+public struct DifferenceDetailMergePlan: Equatable, Sendable {
+    public static let maximumTextUTF16Length = 8_192
+
+    public let direction: DifferenceDetailMergeDirection
+    public let sourceText: String
+    public let sourceFragment: DifferenceDetailTextFragment
+    public let targetText: String
+    public let targetFragment: DifferenceDetailTextFragment
+    public let resultText: String
+
+    public var sourceUTF16Range: NSRange { sourceFragment.utf16Range }
+    public var targetUTF16Range: NSRange { targetFragment.utf16Range }
+    public var replacementText: String { sourceFragment.text }
+
+    fileprivate init(
+        direction: DifferenceDetailMergeDirection,
+        sourceText: String,
+        sourceFragment: DifferenceDetailTextFragment,
+        targetText: String,
+        targetFragment: DifferenceDetailTextFragment,
+        resultText: String
+    ) {
+        self.direction = direction
+        self.sourceText = sourceText
+        self.sourceFragment = sourceFragment
+        self.targetText = targetText
+        self.targetFragment = targetFragment
+        self.resultText = resultText
+    }
+}
+
+public enum DifferenceDetailMergePlanError: Error, LocalizedError, Equatable, Sendable {
+    case detailAbsent
+    case detailUnavailable(DifferenceDetailNoDetailReason)
+    case sourceTextTooLarge
+    case targetTextTooLarge
+    case fragmentTextTooLarge
+    case resultTextTooLarge
+    case staleSourceText
+    case staleTargetText
+    case staleFragment
+    case invalidFragment
+    case ambiguousFragment
+
+    public var errorDescription: String? {
+        switch self {
+        case .detailAbsent:
+            "No difference detail is selected."
+        case .detailUnavailable:
+            "The selected row has no mergeable difference detail."
+        case .sourceTextTooLarge:
+            "Merge source exceeds the \(DifferenceDetailMergePlan.maximumTextUTF16Length)-UTF-16-unit limit."
+        case .targetTextTooLarge:
+            "Merge target exceeds the \(DifferenceDetailMergePlan.maximumTextUTF16Length)-UTF-16-unit limit."
+        case .fragmentTextTooLarge:
+            "Selected fragment exceeds the \(DifferenceDetailMergePlan.maximumTextUTF16Length)-UTF-16-unit limit."
+        case .resultTextTooLarge:
+            "Merge result exceeds the \(DifferenceDetailMergePlan.maximumTextUTF16Length)-UTF-16-unit limit."
+        case .staleSourceText:
+            "Merge source no longer matches the difference detail."
+        case .staleTargetText:
+            "Merge target no longer matches the difference detail."
+        case .staleFragment:
+            "Selected fragment no longer matches the difference detail."
+        case .invalidFragment:
+            "Selection is not one complete highlighted difference fragment."
+        case .ambiguousFragment:
+            "Selected fragment has no unique merge target."
+        }
+    }
+}
+
 public struct DifferenceDetail: Equatable, Sendable {
     private struct GraphemeCodeUnit: Equatable {
         let value: UInt16
@@ -257,6 +334,67 @@ public struct DifferenceDetail: Equatable, Sendable {
             rowIndex: rowIndex,
             leftMovedLinePair: nil,
             rightMovedLinePair: nil
+        )
+    }
+
+    public func mergePlan(
+        selecting fragment: DifferenceDetailTextFragment,
+        direction: DifferenceDetailMergeDirection,
+        currentSourceText: String,
+        currentTargetText: String
+    ) throws -> DifferenceDetailMergePlan {
+        let sides = try mergeSides(
+            direction: direction,
+            currentSourceText: currentSourceText,
+            currentTargetText: currentTargetText
+        )
+        guard fragment.isHighlighted else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        guard !Self.exceedsMergeLimit(fragment.text) else {
+            throw DifferenceDetailMergePlanError.fragmentTextTooLarge
+        }
+
+        let matches = sides.source.fragments.filter {
+            $0.isHighlighted && $0.utf16Range == fragment.utf16Range
+        }
+        guard matches.count <= 1 else {
+            throw DifferenceDetailMergePlanError.ambiguousFragment
+        }
+        guard let expected = matches.first else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        guard Self.exactlyMatches(fragment.text, expected.text) else {
+            throw DifferenceDetailMergePlanError.staleFragment
+        }
+        return try makeMergePlan(
+            selectingUTF16Range: fragment.utf16Range,
+            direction: direction,
+            source: sides.source,
+            target: sides.target,
+            currentSourceText: currentSourceText,
+            currentTargetText: currentTargetText
+        )
+    }
+
+    public func mergePlan(
+        selectingUTF16Range range: NSRange,
+        direction: DifferenceDetailMergeDirection,
+        currentSourceText: String,
+        currentTargetText: String
+    ) throws -> DifferenceDetailMergePlan {
+        let sides = try mergeSides(
+            direction: direction,
+            currentSourceText: currentSourceText,
+            currentTargetText: currentTargetText
+        )
+        return try makeMergePlan(
+            selectingUTF16Range: range,
+            direction: direction,
+            source: sides.source,
+            target: sides.target,
+            currentSourceText: currentSourceText,
+            currentTargetText: currentTargetText
         )
     }
 
@@ -404,6 +542,129 @@ public struct DifferenceDetail: Equatable, Sendable {
         text.utf8.prefix(maximumUTF8Length + 1).count > maximumUTF8Length
             || text.utf16.prefix(maximumUTF16Length + 1).count > maximumUTF16Length
             || text.prefix(maximumCharacterCount + 1).count > maximumCharacterCount
+    }
+
+    private func mergeSides(
+        direction: DifferenceDetailMergeDirection,
+        currentSourceText: String,
+        currentTargetText: String
+    ) throws -> (source: DifferenceDetailSide, target: DifferenceDetailSide) {
+        switch state {
+        case .absent:
+            throw DifferenceDetailMergePlanError.detailAbsent
+        case .noDetail(let reason):
+            throw DifferenceDetailMergePlanError.detailUnavailable(reason)
+        case .detail:
+            break
+        }
+        guard !Self.exceedsMergeLimit(currentSourceText) else {
+            throw DifferenceDetailMergePlanError.sourceTextTooLarge
+        }
+        guard !Self.exceedsMergeLimit(currentTargetText) else {
+            throw DifferenceDetailMergePlanError.targetTextTooLarge
+        }
+
+        let sides: (source: DifferenceDetailSide?, target: DifferenceDetailSide?) = switch direction {
+        case .leftToRight:
+            (left, right)
+        case .rightToLeft:
+            (right, left)
+        }
+        guard let source = sides.source, let target = sides.target else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        guard Self.exactlyMatches(currentSourceText, source.text) else {
+            throw DifferenceDetailMergePlanError.staleSourceText
+        }
+        guard Self.exactlyMatches(currentTargetText, target.text) else {
+            throw DifferenceDetailMergePlanError.staleTargetText
+        }
+        return (source, target)
+    }
+
+    private func makeMergePlan(
+        selectingUTF16Range range: NSRange,
+        direction: DifferenceDetailMergeDirection,
+        source: DifferenceDetailSide,
+        target: DifferenceDetailSide,
+        currentSourceText: String,
+        currentTargetText: String
+    ) throws -> DifferenceDetailMergePlan {
+        guard Self.isValidMergeRange(range, in: currentSourceText) else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        let matchingIndices = source.highlightRanges.indices.filter {
+            source.highlightRanges[$0] == range
+        }
+        guard matchingIndices.count <= 1 else {
+            throw DifferenceDetailMergePlanError.ambiguousFragment
+        }
+        guard let sourceIndex = matchingIndices.first else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        guard source.highlightRanges.count == target.highlightRanges.count,
+              target.highlightRanges.indices.contains(sourceIndex) else {
+            throw DifferenceDetailMergePlanError.ambiguousFragment
+        }
+
+        let targetRange = target.highlightRanges[sourceIndex]
+        guard Self.isValidMergeRange(targetRange, in: currentTargetText) else {
+            throw DifferenceDetailMergePlanError.ambiguousFragment
+        }
+        let sourceFragment = DifferenceDetailTextFragment(
+            text: (currentSourceText as NSString).substring(with: range),
+            utf16Range: range,
+            isHighlighted: true
+        )
+        let targetFragment = DifferenceDetailTextFragment(
+            text: (currentTargetText as NSString).substring(with: targetRange),
+            utf16Range: targetRange,
+            isHighlighted: true
+        )
+
+        let (retainedLength, underflow) = currentTargetText.utf16.count
+            .subtractingReportingOverflow(targetRange.length)
+        let (resultLength, overflow) = retainedLength.addingReportingOverflow(sourceFragment.text.utf16.count)
+        guard !underflow, !overflow,
+              resultLength <= DifferenceDetailMergePlan.maximumTextUTF16Length else {
+            throw DifferenceDetailMergePlanError.resultTextTooLarge
+        }
+        let resultText = (currentTargetText as NSString).replacingCharacters(
+            in: targetRange,
+            with: sourceFragment.text
+        )
+        guard resultText.utf16.count == resultLength else {
+            throw DifferenceDetailMergePlanError.invalidFragment
+        }
+        return DifferenceDetailMergePlan(
+            direction: direction,
+            sourceText: currentSourceText,
+            sourceFragment: sourceFragment,
+            targetText: currentTargetText,
+            targetFragment: targetFragment,
+            resultText: resultText
+        )
+    }
+
+    private static func exceedsMergeLimit(_ text: String) -> Bool {
+        text.utf16.prefix(DifferenceDetailMergePlan.maximumTextUTF16Length + 1).count
+            > DifferenceDetailMergePlan.maximumTextUTF16Length
+    }
+
+    private static func exactlyMatches(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.elementsEqual(rhs.utf8)
+    }
+
+    private static func isValidMergeRange(_ range: NSRange, in text: String) -> Bool {
+        guard range.location >= 0,
+              range.location != NSNotFound,
+              range.length >= 0 else {
+            return false
+        }
+        let (end, overflow) = range.location.addingReportingOverflow(range.length)
+        guard !overflow, end <= text.utf16.count else { return false }
+        let boundaries = utf16Graphemes(in: text).boundaries
+        return boundaries.contains(range.location) && boundaries.contains(end)
     }
 
     private static func intralineRanges(

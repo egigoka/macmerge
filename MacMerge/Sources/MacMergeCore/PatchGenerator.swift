@@ -23,11 +23,31 @@ public struct PatchGeneratorOptions: Equatable, Sendable {
     }
 }
 
+public struct PatchGeneratorAppendOptions: Equatable, Sendable {
+    public var lineEnding: LineEnding
+    public var maximumFileBytes: Int
+
+    public init(
+        lineEnding: LineEnding = .lf,
+        maximumFileBytes: Int = 64 * 1024 * 1024
+    ) {
+        self.lineEnding = lineEnding
+        self.maximumFileBytes = maximumFileBytes
+    }
+}
+
 public enum PatchGeneratorError: Error, LocalizedError, Equatable, Sendable {
     case invalidContextLines(Int)
     case invalidMaximumOutputBytes(Int)
+    case invalidMaximumFileBytes(Int)
     case invalidPath(String)
+    case invalidFileURL(String)
+    case notRegularFile(String)
+    case changedOnDisk
+    case metadataPreservationFailed(String)
     case outputTooLarge(maximumBytes: Int)
+    case fileTooLarge(maximumBytes: Int)
+    case secureAppendUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -35,15 +55,65 @@ public enum PatchGeneratorError: Error, LocalizedError, Equatable, Sendable {
             "Patch context line count must not be negative: \(value)."
         case .invalidMaximumOutputBytes(let value):
             "Patch output byte limit must not be negative: \(value)."
+        case .invalidMaximumFileBytes(let value):
+            "Patch file byte limit must not be negative: \(value)."
         case .invalidPath(let path):
             "Patch path is empty or contains NUL: \(path)."
+        case .invalidFileURL(let path):
+            "Patch destination is not a valid absolute local file URL: \(path)."
+        case .notRegularFile(let path):
+            "Patch destination is not a regular file: \(path)."
+        case .changedOnDisk:
+            "Patch destination changed while preparing the append."
+        case .metadataPreservationFailed(let path):
+            "Patch destination metadata could not be preserved: \(path)."
         case .outputTooLarge(let maximumBytes):
             "Generated patch exceeds the \(maximumBytes)-byte output limit."
+        case .fileTooLarge(let maximumBytes):
+            "Appended patch file exceeds the \(maximumBytes)-byte file limit."
+        case .secureAppendUnavailable:
+            "Secure append requires identity-conditioned replacement, which is unavailable through current file primitives. No file was changed."
         }
     }
 }
 
 public enum PatchGenerator: Sendable {
+    /// Composes an append without decoding or normalizing any existing bytes.
+    public static func appending(
+        generatedPatch: String,
+        to existingData: Data,
+        options: PatchGeneratorAppendOptions = PatchGeneratorAppendOptions()
+    ) throws -> Data {
+        try composedAppend(generatedPatch, to: existingData, options: options).data
+    }
+
+    /// Fails closed until identity-conditioned replacement is available.
+    public static func append(
+        generatedPatch: String,
+        to fileURL: URL,
+        options: PatchGeneratorAppendOptions = PatchGeneratorAppendOptions()
+    ) throws -> Never {
+        try validate(appendOptions: options)
+        _ = try validatedLocalFileURL(fileURL)
+        _ = generatedPatch
+        throw PatchGeneratorError.secureAppendUnavailable
+    }
+
+    /// Generates a bounded patch, then fails closed without touching the file.
+    public static func append(
+        old oldText: String,
+        new newText: String,
+        to fileURL: URL,
+        options: PatchGeneratorOptions = PatchGeneratorOptions(),
+        appendOptions: PatchGeneratorAppendOptions = PatchGeneratorAppendOptions()
+    ) throws -> Never {
+        try append(
+            generatedPatch: generate(old: oldText, new: newText, options: options),
+            to: fileURL,
+            options: appendOptions
+        )
+    }
+
     public static func generate(
         old oldText: String,
         new newText: String,
@@ -192,6 +262,38 @@ public enum PatchGenerator: Sendable {
         else {
             throw PatchGeneratorError.invalidPath(path)
         }
+    }
+
+    private static func validate(appendOptions: PatchGeneratorAppendOptions) throws {
+        guard appendOptions.maximumFileBytes >= 0 else {
+            throw PatchGeneratorError.invalidMaximumFileBytes(appendOptions.maximumFileBytes)
+        }
+    }
+
+    private static func composedAppend(
+        _ generatedPatch: String,
+        to existingData: Data,
+        options: PatchGeneratorAppendOptions
+    ) throws -> (data: Data, appendedBytes: Int) {
+        try validate(appendOptions: options)
+        guard existingData.count <= options.maximumFileBytes else {
+            throw PatchGeneratorError.fileTooLarge(maximumBytes: options.maximumFileBytes)
+        }
+        guard !generatedPatch.isEmpty else { return (existingData, 0) }
+
+        var output = BoundedData(existingData, maximumBytes: options.maximumFileBytes)
+        if let finalByte = existingData.last, finalByte != 0x0A, finalByte != 0x0D {
+            try output.append(contentsOf: Array(options.lineEnding.rawValue.utf8))
+        }
+        let selectedEnding = Array(options.lineEnding.rawValue.utf8)
+        for byte in generatedPatch.utf8 {
+            if byte == 0x0A {
+                try output.append(contentsOf: selectedEnding)
+            } else {
+                try output.append(byte)
+            }
+        }
+        return (output.data, output.data.count - existingData.count)
     }
 
     private static func headerPath(_ path: String) -> String {
@@ -357,4 +459,414 @@ private struct BoundedOutput {
             throw PatchGeneratorError.outputTooLarge(maximumBytes: maximumBytes)
         }
     }
+}
+
+private struct BoundedData {
+    private(set) var data: Data
+    private let maximumBytes: Int
+
+    init(_ data: Data, maximumBytes: Int) {
+        self.data = data
+        self.maximumBytes = maximumBytes
+        self.data.reserveCapacity(min(maximumBytes, data.count + 64 * 1024))
+    }
+
+    mutating func append(_ byte: UInt8) throws {
+        try reserve(1)
+        data.append(byte)
+    }
+
+    mutating func append(contentsOf bytes: [UInt8]) throws {
+        try reserve(bytes.count)
+        data.append(contentsOf: bytes)
+    }
+
+    private func reserve(_ count: Int) throws {
+        guard count <= maximumBytes - data.count else {
+            throw PatchGeneratorError.fileTooLarge(maximumBytes: maximumBytes)
+        }
+    }
+}
+
+private struct PatchAppendFileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    let mode: mode_t
+    let links: nlink_t
+    let owner: uid_t
+    let group: gid_t
+    let size: off_t
+    let flags: UInt32
+    let generation: UInt32
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    init(_ information: stat) {
+        device = information.st_dev
+        inode = information.st_ino
+        mode = information.st_mode
+        links = information.st_nlink
+        owner = information.st_uid
+        group = information.st_gid
+        size = information.st_size
+        flags = information.st_flags
+        generation = information.st_gen
+        modifiedSeconds = information.st_mtimespec.tv_sec
+        modifiedNanoseconds = information.st_mtimespec.tv_nsec
+        changedSeconds = information.st_ctimespec.tv_sec
+        changedNanoseconds = information.st_ctimespec.tv_nsec
+    }
+
+    func hasMetadataCopied(from source: PatchAppendFileIdentity) -> Bool {
+        mode == source.mode
+            && owner == source.owner
+            && group == source.group
+            && flags == source.flags
+    }
+}
+
+private struct PatchAppendDirectoryIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+
+    init(_ information: stat) {
+        device = information.st_dev
+        inode = information.st_ino
+    }
+}
+
+private struct PatchAppendStableReference: Sendable {
+    var storage = [UInt8](repeating: 0, count: 80)
+}
+
+private struct PatchAppendStableReferenceAPI: @unchecked Sendable {
+    typealias MakeReference = @convention(c) (
+        UnsafePointer<UInt8>?,
+        UInt32,
+        UnsafeMutableRawPointer?,
+        UnsafeMutablePointer<UInt8>?
+    ) -> OSStatus
+    typealias ResolveReference = @convention(c) (
+        UnsafeRawPointer?,
+        UnsafeMutablePointer<UInt8>?,
+        UInt32
+    ) -> OSStatus
+    typealias DeleteReference = @convention(c) (UnsafeRawPointer?) -> Int16
+
+    static let shared: PatchAppendStableReferenceAPI? = {
+        guard let handle = Darwin.dlopen(
+            "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+            RTLD_LAZY | RTLD_LOCAL
+        ) else { return nil }
+        guard let makeReference = Darwin.dlsym(handle, "FSPathMakeRefWithOptions"),
+            let resolveReference = Darwin.dlsym(handle, "FSRefMakePath"),
+            let deleteReference = Darwin.dlsym(handle, "FSDeleteObject")
+        else {
+            Darwin.dlclose(handle)
+            return nil
+        }
+        return PatchAppendStableReferenceAPI(
+            handle: handle,
+            makeReference: unsafeBitCast(makeReference, to: MakeReference.self),
+            resolveReference: unsafeBitCast(resolveReference, to: ResolveReference.self),
+            deleteReference: unsafeBitCast(deleteReference, to: DeleteReference.self)
+        )
+    }()
+
+    private let handle: UnsafeMutableRawPointer
+    private let makeReference: MakeReference
+    private let resolveReference: ResolveReference
+    private let deleteReference: DeleteReference
+
+    func makeReference(to url: URL) -> PatchAppendStableReference? {
+        var reference = PatchAppendStableReference()
+        let status = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return OSStatus(-1) }
+            return reference.storage.withUnsafeMutableBytes { storage in
+                makeReference(
+                    UnsafeRawPointer(path).assumingMemoryBound(to: UInt8.self),
+                    1,
+                    storage.baseAddress,
+                    nil
+                )
+            }
+        }
+        return status == 0 ? reference : nil
+    }
+
+    func resolve(_ reference: PatchAppendStableReference) -> URL? {
+        var path = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let status = reference.storage.withUnsafeBytes { storage in
+            path.withUnsafeMutableBufferPointer { pathBuffer in
+                resolveReference(
+                    storage.baseAddress,
+                    UnsafeMutableRawPointer(pathBuffer.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                    UInt32(pathBuffer.count)
+                )
+            }
+        }
+        guard status == 0, let pathStart = path.withUnsafeBufferPointer({ $0.baseAddress }) else {
+            return nil
+        }
+        return URL(
+            fileURLWithFileSystemRepresentation: pathStart,
+            isDirectory: false,
+            relativeTo: nil
+        )
+    }
+
+    func delete(_ reference: PatchAppendStableReference) -> OSStatus {
+        reference.storage.withUnsafeBytes { storage in
+            OSStatus(deleteReference(storage.baseAddress))
+        }
+    }
+}
+
+private func validatedLocalFileURL(_ url: URL) throws -> URL {
+    guard url.isFileURL,
+        url.baseURL == nil,
+        url.query == nil,
+        url.fragment == nil,
+        !url.hasDirectoryPath,
+        url.path.hasPrefix("/"),
+        !url.path.hasPrefix("//"),
+        !url.path.utf8.contains(0),
+        url.lastPathComponent != ".",
+        url.lastPathComponent != ".."
+    else {
+        throw PatchGeneratorError.invalidFileURL(url.absoluteString)
+    }
+    let components = url.path.split(separator: "/", omittingEmptySubsequences: false)
+    guard components.first?.isEmpty == true,
+        components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+    else {
+        throw PatchGeneratorError.invalidFileURL(url.absoluteString)
+    }
+    return url
+}
+
+private func openParentDirectory(of url: URL) throws -> (descriptor: Int32, name: String) {
+    let components = url.pathComponents
+    guard components.first == "/", components.count > 1,
+        let name = components.last, name != ".", name != ".."
+    else {
+        throw PatchGeneratorError.invalidFileURL(url.absoluteString)
+    }
+
+    var descriptor = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw appendPOSIXError() }
+    do {
+        for component in components.dropFirst().dropLast() {
+            let next = component.withCString {
+                Darwin.openat(
+                    descriptor,
+                    $0,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                )
+            }
+            guard next >= 0 else { throw appendPOSIXError() }
+            Darwin.close(descriptor)
+            descriptor = next
+        }
+        return (descriptor, name)
+    } catch {
+        Darwin.close(descriptor)
+        throw error
+    }
+}
+
+private func appendFileIdentity(_ descriptor: Int32, path: String) throws -> PatchAppendFileIdentity {
+    var information = stat()
+    guard Darwin.fstat(descriptor, &information) == 0 else { throw appendPOSIXError() }
+    guard information.st_mode & S_IFMT == S_IFREG else {
+        throw PatchGeneratorError.notRegularFile(path)
+    }
+    return PatchAppendFileIdentity(information)
+}
+
+private func appendPathIdentity(
+    directoryFD: Int32,
+    name: String
+) throws -> PatchAppendFileIdentity {
+    var information = stat()
+    let result = name.withCString {
+        Darwin.fstatat(directoryFD, $0, &information, AT_SYMLINK_NOFOLLOW)
+    }
+    guard result == 0 else { throw appendPOSIXError() }
+    guard information.st_mode & S_IFMT == S_IFREG else {
+        throw PatchGeneratorError.notRegularFile(name)
+    }
+    return PatchAppendFileIdentity(information)
+}
+
+private func appendDirectoryIdentity(
+    _ descriptor: Int32,
+    path: String
+) throws -> PatchAppendDirectoryIdentity {
+    var information = stat()
+    guard Darwin.fstat(descriptor, &information) == 0 else { throw appendPOSIXError() }
+    guard information.st_mode & S_IFMT == S_IFDIR else {
+        throw PatchGeneratorError.invalidFileURL(path)
+    }
+    return PatchAppendDirectoryIdentity(information)
+}
+
+private func appendVerifiedData(
+    from descriptor: Int32,
+    expectedIdentity: PatchAppendFileIdentity,
+    maximumBytes: Int
+) throws -> Data {
+    guard try appendFileIdentity(descriptor, path: "") == expectedIdentity else {
+        throw PatchGeneratorError.changedOnDisk
+    }
+    var data = Data()
+    let chunkSize = 64 * 1024
+    var offset: off_t = 0
+    while data.count <= maximumBytes {
+        let remaining = maximumBytes + 1 - data.count
+        var chunk = Data(count: min(chunkSize, remaining))
+        let count = chunk.withUnsafeMutableBytes { buffer -> Int in
+            guard let baseAddress = buffer.baseAddress else { return 0 }
+            while true {
+                let result = Darwin.pread(descriptor, baseAddress, buffer.count, offset)
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard count >= 0 else { throw appendPOSIXError() }
+        guard count > 0 else { break }
+        chunk.count = count
+        data.append(chunk)
+        offset += off_t(count)
+    }
+    guard data.count <= maximumBytes else {
+        throw PatchGeneratorError.fileTooLarge(maximumBytes: maximumBytes)
+    }
+    guard data.count == Int(expectedIdentity.size),
+        try appendFileIdentity(descriptor, path: "") == expectedIdentity
+    else {
+        throw PatchGeneratorError.changedOnDisk
+    }
+    return data
+}
+
+private func appendDescriptorContains(
+    _ expectedData: Data,
+    descriptor: Int32,
+    expectedIdentity: PatchAppendFileIdentity,
+    maximumBytes: Int
+) throws -> Bool {
+    guard expectedData.count <= maximumBytes,
+        try appendFileIdentity(descriptor, path: "") == expectedIdentity,
+        expectedIdentity.size == off_t(expectedData.count)
+    else { return false }
+    return try appendVerifiedData(
+        from: descriptor,
+        expectedIdentity: expectedIdentity,
+        maximumBytes: maximumBytes
+    ) == expectedData
+}
+
+private func appendWrite(_ data: Data, to descriptor: Int32) throws {
+    try data.withUnsafeBytes { buffer in
+        guard let baseAddress = buffer.baseAddress else { return }
+        var offset = 0
+        while offset < buffer.count {
+            let written = Darwin.write(
+                descriptor,
+                baseAddress.advanced(by: offset),
+                buffer.count - offset
+            )
+            if written < 0, errno == EINTR { continue }
+            guard written > 0 else { throw appendPOSIXError() }
+            offset += written
+        }
+    }
+}
+
+private func appendCopyMetadata(
+    from sourceFD: Int32,
+    identity sourceIdentity: PatchAppendFileIdentity,
+    to destinationFD: Int32,
+    destinationPath: String
+) throws {
+    guard Darwin.fcopyfile(
+        sourceFD,
+        destinationFD,
+        nil,
+        copyfile_flags_t(COPYFILE_METADATA)
+    ) == 0,
+        Darwin.fchmod(destinationFD, sourceIdentity.mode & mode_t(0o7777)) == 0
+    else {
+        throw PatchGeneratorError.metadataPreservationFailed(destinationPath)
+    }
+    let destinationIdentity = try appendFileIdentity(destinationFD, path: destinationPath)
+    guard destinationIdentity.hasMetadataCopied(from: sourceIdentity) else {
+        throw PatchGeneratorError.metadataPreservationFailed(destinationPath)
+    }
+}
+
+private func appendFullySynchronize(_ descriptor: Int32) throws {
+    while Darwin.fsync(descriptor) != 0 {
+        if errno == EINTR { continue }
+        throw appendPOSIXError()
+    }
+    while Darwin.fcntl(descriptor, F_FULLFSYNC) != 0 {
+        if errno == EINTR { continue }
+        throw appendPOSIXError()
+    }
+}
+
+private func appendRequestedPathMatches(
+    _ url: URL,
+    expectedName: String,
+    expectedDirectoryIdentity: PatchAppendDirectoryIdentity,
+    expectedFileIdentity: PatchAppendFileIdentity
+) throws -> Bool {
+    let (directoryFD, name) = try openParentDirectory(of: url)
+    defer { Darwin.close(directoryFD) }
+    guard name == expectedName else { return false }
+    let currentDirectoryIdentity = try appendDirectoryIdentity(directoryFD, path: url.path)
+    guard currentDirectoryIdentity == expectedDirectoryIdentity else { return false }
+    let currentFileIdentity = try appendPathIdentity(directoryFD: directoryFD, name: name)
+    return currentFileIdentity == expectedFileIdentity
+}
+
+private func appendReferenceMatches(
+    _ reference: PatchAppendStableReference,
+    using referenceAPI: PatchAppendStableReferenceAPI,
+    expectedURL: URL,
+    expectedIdentity: PatchAppendFileIdentity
+) -> Bool {
+    guard let resolvedURL = referenceAPI.resolve(reference),
+        resolvedURL.standardizedFileURL == expectedURL.standardizedFileURL
+    else { return false }
+    let descriptor = Darwin.open(
+        resolvedURL.path,
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard descriptor >= 0 else { return false }
+    defer { Darwin.close(descriptor) }
+    return (try? appendFileIdentity(descriptor, path: resolvedURL.path)) == expectedIdentity
+}
+
+private func appendRemoveReference(
+    _ reference: PatchAppendStableReference,
+    using referenceAPI: PatchAppendStableReferenceAPI,
+    expectedURL: URL,
+    expectedIdentity: PatchAppendFileIdentity
+) -> Bool {
+    guard appendReferenceMatches(
+        reference,
+        using: referenceAPI,
+        expectedURL: expectedURL,
+        expectedIdentity: expectedIdentity
+    ) else { return false }
+    return referenceAPI.delete(reference) == 0
+}
+
+private func appendPOSIXError() -> NSError {
+    NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
 }

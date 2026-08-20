@@ -119,6 +119,29 @@ public enum NumberedTextCopy: Sendable {
     static let maximumPaddingUTF8Bytes = maximumChunkBytes
     static let maximumPaddingUTF16CodeUnits = maximumChunkBytes
 
+    /// Formats an ordered selection of aligned `DiffRow` indices.
+    /// Discontiguous selections and rows missing the selected side retain their positions.
+    public static func format(
+        rows: [DiffRow],
+        selectedRows: IndexSet,
+        side: NumberedTextCopySide,
+        options: NumberedTextCopyOptions = NumberedTextCopyOptions()
+    ) throws -> String {
+        var selectedRanges: [Range<Int>] = []
+        for (index, range) in selectedRows.rangeView.enumerated() {
+            if index.isMultiple(of: 1_024) {
+                try Task.checkCancellation()
+            }
+            selectedRanges.append(range)
+        }
+        return try format(
+            rows: rows,
+            selectedRanges: selectedRanges,
+            side: side,
+            options: options
+        )
+    }
+
     /// Formats ordered, non-overlapping, half-open ranges of aligned `DiffRow` indices.
     /// Missing rows retain their position and use `options.missingLineNumber` with empty text.
     public static func format(

@@ -1,4 +1,13 @@
+import CoreFoundation
 import Foundation
+
+private extension String.Encoding {
+    static let windowsCP1255 = String.Encoding(
+        rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.windowsHebrew.rawValue)
+        )
+    )
+}
 
 public enum TextFileEncoding: String, Equatable, Sendable {
     case utf8
@@ -12,6 +21,7 @@ public enum TextFileEncoding: String, Equatable, Sendable {
     case windows1252
     case windows1253
     case windows1254
+    case windows1255
 
     public var displayName: String {
         switch self {
@@ -37,6 +47,8 @@ public enum TextFileEncoding: String, Equatable, Sendable {
             "Greek (CP1253)"
         case .windows1254:
             "Turkish (CP1254)"
+        case .windows1255:
+            "Hebrew (CP1255)"
         }
     }
 }
@@ -77,7 +89,7 @@ public enum TextFileCodecError: Error, LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidTextEncoding:
-            "File encoding is unsupported or ambiguous. Supported legacy encodings are CP932, CP51932, CP50220, CP1250, CP1251, CP1252, CP1253, and CP1254."
+            "File encoding is unsupported or ambiguous. Supported legacy encodings are CP932, CP51932, CP50220, CP1250, CP1251, CP1252, CP1253, CP1254, and CP1255."
         case .missingUTF16ByteOrderMark:
             "UTF-16 byte order is ambiguous because the file has no byte-order mark."
         case .unsupportedUTF32:
@@ -167,7 +179,8 @@ public enum TextFileCodec {
             }
         }
         for encoding in [
-            TextFileEncoding.windows1250, .windows1251, .windows1252, .windows1253, .windows1254
+            TextFileEncoding.windows1250, .windows1251, .windows1252, .windows1253, .windows1254,
+            .windows1255
         ] {
             if let document = decodeLegacy(data, encoding: encoding) {
                 legacyCandidates.append(document)
@@ -226,7 +239,7 @@ public enum TextFileCodec {
                 originalData: data
             )
         case .shiftJIS, .japaneseEUC, .iso2022JP, .windows1250, .windows1251, .windows1252,
-             .windows1253, .windows1254:
+             .windows1253, .windows1254, .windows1255:
             guard let document = decodeLegacy(data, encoding: encoding) else {
                 throw TextFileCodecError.invalidTextEncoding
             }
@@ -275,12 +288,15 @@ public enum TextFileCodec {
         case .windows1254:
             stringEncoding = .windowsCP1254
             byteOrderMark = Data()
+        case .windows1255:
+            stringEncoding = .windowsCP1255
+            byteOrderMark = Data()
         }
 
         let payload: Data
         switch document.encoding {
         case .shiftJIS, .japaneseEUC, .iso2022JP, .windows1250, .windows1251, .windows1252,
-             .windows1253, .windows1254:
+             .windows1253, .windows1254, .windows1255:
             guard let encoded = encodeLegacy(document.text, encoding: document.encoding) else {
                 throw TextFileCodecError.encodingFailed(document.encoding)
             }
@@ -328,6 +344,8 @@ public enum TextFileCodec {
             stringEncoding = .windowsCP1253
         case .windows1254:
             stringEncoding = .windowsCP1254
+        case .windows1255:
+            stringEncoding = .windowsCP1255
         }
 
         guard let text = String(data: Data(data), encoding: stringEncoding) else {
@@ -489,6 +507,8 @@ public enum TextFileCodec {
             text = String(data: data, encoding: .windowsCP1253)
         case .windows1254:
             text = String(data: data, encoding: .windowsCP1254)
+        case .windows1255:
+            text = String(data: data, encoding: .windowsCP1255)
         case .utf8, .utf16LittleEndian, .utf16BigEndian:
             return nil
         }
@@ -531,7 +551,7 @@ public enum TextFileCodec {
         case .iso2022JP:
             data = shiftJISToISO2022JP(shiftJIS)
         case .utf8, .utf16LittleEndian, .utf16BigEndian, .windows1250, .windows1251, .windows1252,
-             .windows1253, .windows1254:
+             .windows1253, .windows1254, .windows1255:
             return nil
         }
 
@@ -551,6 +571,7 @@ public enum TextFileCodec {
         case .windows1252: .windowsCP1252
         case .windows1253: .windowsCP1253
         case .windows1254: .windowsCP1254
+        case .windows1255: .windowsCP1255
         default: nil
         }
     }
@@ -600,7 +621,7 @@ public enum TextFileCodec {
             return isValidEUCJP(data)
         case .iso2022JP:
             return iso2022JPToShiftJIS(data) != nil
-        case .windows1250, .windows1251, .windows1252, .windows1253, .windows1254:
+        case .windows1250, .windows1251, .windows1252, .windows1253, .windows1254, .windows1255:
             return true
         case .utf8, .utf16LittleEndian, .utf16BigEndian:
             return false

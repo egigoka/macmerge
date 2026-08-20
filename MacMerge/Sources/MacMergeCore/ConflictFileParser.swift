@@ -47,19 +47,28 @@ public struct ConflictFileConflict: Equatable, Sendable {
     public let currentLabel: String?
     public let baseLabel: String?
     public let incomingLabel: String?
+    public let hasCurrentContent: Bool
+    public let hasBaseContent: Bool
+    public let hasIncomingContent: Bool
 
     public init(
         sourceLineRange: ClosedRange<Int>,
         markerWidth: Int,
         currentLabel: String?,
         baseLabel: String?,
-        incomingLabel: String?
+        incomingLabel: String?,
+        hasCurrentContent: Bool = true,
+        hasBaseContent: Bool? = nil,
+        hasIncomingContent: Bool = true
     ) {
         self.sourceLineRange = sourceLineRange
         self.markerWidth = markerWidth
         self.currentLabel = currentLabel
         self.baseLabel = baseLabel
         self.incomingLabel = incomingLabel
+        self.hasCurrentContent = hasCurrentContent
+        self.hasBaseContent = hasBaseContent ?? (baseLabel != nil)
+        self.hasIncomingContent = hasIncomingContent
     }
 }
 
@@ -267,7 +276,10 @@ public enum ConflictFileParser: Sendable {
                             markerWidth: completedConflict.markerWidth,
                             currentLabel: completedConflict.currentLabel,
                             baseLabel: completedConflict.baseLabel,
-                            incomingLabel: marker.label
+                            incomingLabel: marker.label,
+                            hasCurrentContent: completedConflict.hasCurrentContent,
+                            hasBaseContent: completedConflict.hasBaseContent,
+                            hasIncomingContent: completedConflict.hasIncomingContent
                         )
                     )
                     activeConflict = nil
@@ -290,10 +302,13 @@ public enum ConflictFileParser: Sendable {
                     }
                 case .current:
                     currentOutput.append(contentsOf: record)
+                    activeConflict?.hasCurrentContent = true
                 case .base:
                     baseOutput?.append(contentsOf: record)
+                    activeConflict?.hasBaseContent = true
                 case .incoming:
                     incomingOutput.append(contentsOf: record)
+                    activeConflict?.hasIncomingContent = true
                 }
             }
 
@@ -341,6 +356,9 @@ public enum ConflictFileParser: Sendable {
         let currentLabel: String?
         var baseLabel: String?
         let currentOutputStart: Int
+        var hasCurrentContent = false
+        var hasBaseContent = false
+        var hasIncomingContent = false
     }
 
     private struct Marker {

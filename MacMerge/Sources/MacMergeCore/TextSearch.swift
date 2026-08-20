@@ -57,6 +57,409 @@ public enum TextSearchDirection: Equatable, Sendable {
     case backward
 }
 
+/// Complete find or find-and-replace state suitable for restoring UI options.
+/// A `nil` replacement represents find-only state; an empty replacement is a replace operation.
+public struct TextSearchPreset: Equatable, Sendable {
+    public let query: TextSearchQuery
+    public let replacement: String?
+    public let direction: TextSearchDirection
+    public let wrap: Bool
+
+    public init(
+        query: TextSearchQuery,
+        replacement: String? = nil,
+        direction: TextSearchDirection = .forward,
+        wrap: Bool = true
+    ) {
+        self.query = query
+        self.replacement = replacement
+        self.direction = direction
+        self.wrap = wrap
+    }
+}
+
+public enum TextSearchHistoryError: Error, Equatable, LocalizedError, Sendable {
+    case encodedDataTooLarge(maximumBytes: Int)
+    case unsupportedSchemaVersion(Int)
+    case invalidCapacity(Int)
+    case invalidUTF8ByteLimit(Int)
+    case tooManyPresets(maximumPresets: Int)
+    case patternTooLarge(maximumUTF8Bytes: Int)
+    case replacementTooLarge(maximumUTF8Bytes: Int)
+    case historyTooLarge(maximumUTF8Bytes: Int)
+    case duplicatePreset
+
+    public var errorDescription: String? {
+        switch self {
+        case .encodedDataTooLarge(let maximumBytes):
+            "Text search history data exceeds the \(maximumBytes)-byte limit."
+        case .unsupportedSchemaVersion(let version):
+            "Unsupported text search history schema version: \(version)."
+        case .invalidCapacity(let capacity):
+            "Text search history capacity is invalid: \(capacity)."
+        case .invalidUTF8ByteLimit(let limit):
+            "Text search history UTF-8 byte limit is invalid: \(limit)."
+        case .tooManyPresets(let maximumPresets):
+            "Text search history exceeds the \(maximumPresets)-preset limit."
+        case .patternTooLarge(let maximumUTF8Bytes):
+            "Search pattern exceeds the \(maximumUTF8Bytes)-byte UTF-8 limit."
+        case .replacementTooLarge(let maximumUTF8Bytes):
+            "Replacement text exceeds the \(maximumUTF8Bytes)-byte UTF-8 limit."
+        case .historyTooLarge(let maximumUTF8Bytes):
+            "Text search history exceeds the \(maximumUTF8Bytes)-byte UTF-8 limit."
+        case .duplicatePreset:
+            "Text search history contains a duplicate preset."
+        }
+    }
+}
+
+/// Bounded most-recently-used find/replace state. `presets[0]` is most recent.
+public struct TextSearchHistory: Equatable, Sendable, RandomAccessCollection {
+    public static let currentSchemaVersion = 1
+    public static let defaultCapacity = 20
+    public static let maximumCapacity = 1_000
+    public static let maximumPatternUTF8Bytes = 64 * 1024
+    public static let maximumReplacementUTF8Bytes = 1024 * 1024
+    public static let defaultUTF8ByteLimit = 2 * 1024 * 1024
+    public static let maximumUTF8ByteLimit = 16 * 1024 * 1024
+    public static let maximumEncodedBytes = maximumUTF8ByteLimit * 6 + 256 * 1024
+
+    public typealias Index = Int
+
+    public let capacity: Int
+    public let utf8ByteLimit: Int
+    public private(set) var presets: [TextSearchPreset]
+    public private(set) var retainedUTF8ByteCount: Int
+
+    public var startIndex: Int { presets.startIndex }
+    public var endIndex: Int { presets.endIndex }
+
+    public subscript(position: Int) -> TextSearchPreset {
+        presets[position]
+    }
+
+    public init(
+        capacity: Int = defaultCapacity,
+        utf8ByteLimit: Int = defaultUTF8ByteLimit
+    ) {
+        Self.preconditionValid(capacity: capacity, utf8ByteLimit: utf8ByteLimit)
+        self.capacity = capacity
+        self.utf8ByteLimit = utf8ByteLimit
+        presets = []
+        retainedUTF8ByteCount = 0
+    }
+
+    public init(
+        _ presets: [TextSearchPreset],
+        capacity: Int = defaultCapacity,
+        utf8ByteLimit: Int = defaultUTF8ByteLimit
+    ) throws {
+        Self.preconditionValid(capacity: capacity, utf8ByteLimit: utf8ByteLimit)
+        self.capacity = capacity
+        self.utf8ByteLimit = utf8ByteLimit
+        self.presets = []
+        retainedUTF8ByteCount = 0
+
+        for preset in presets where !self.presets.contains(preset) {
+            let byteCount = try Self.validatedUTF8ByteCount(of: preset)
+            guard byteCount <= utf8ByteLimit else {
+                throw TextSearchHistoryError.historyTooLarge(maximumUTF8Bytes: utf8ByteLimit)
+            }
+            guard self.presets.count < capacity,
+                retainedUTF8ByteCount <= utf8ByteLimit - byteCount
+            else {
+                break
+            }
+            self.presets.append(preset)
+            retainedUTF8ByteCount += byteCount
+        }
+    }
+
+    /// Adds or promotes a preset, evicting least-recent entries to satisfy both limits.
+    @discardableResult
+    public mutating func record(_ preset: TextSearchPreset) throws -> Bool {
+        let byteCount = try Self.validatedUTF8ByteCount(of: preset)
+        guard byteCount <= utf8ByteLimit else {
+            throw TextSearchHistoryError.historyTooLarge(maximumUTF8Bytes: utf8ByteLimit)
+        }
+        guard presets.first != preset else { return false }
+
+        if let existingIndex = presets.firstIndex(of: preset) {
+            removePreset(at: existingIndex)
+        }
+        while presets.count >= capacity || retainedUTF8ByteCount > utf8ByteLimit - byteCount {
+            removePreset(at: presets.index(before: presets.endIndex))
+        }
+        presets.insert(preset, at: 0)
+        retainedUTF8ByteCount += byteCount
+        return true
+    }
+
+    @discardableResult
+    public mutating func remove(_ preset: TextSearchPreset) -> Bool {
+        guard let index = presets.firstIndex(of: preset) else { return false }
+        removePreset(at: index)
+        return true
+    }
+
+    public mutating func removeAll(keepingCapacity: Bool = false) {
+        presets.removeAll(keepingCapacity: keepingCapacity)
+        retainedUTF8ByteCount = 0
+    }
+
+    /// Returns compact JSON with recursively sorted object keys.
+    public func encodedData() throws -> Data {
+        try validatePersistedState()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(WireHistory(self))
+        guard data.count <= Self.maximumEncodedBytes else {
+            throw TextSearchHistoryError.encodedDataTooLarge(
+                maximumBytes: Self.maximumEncodedBytes
+            )
+        }
+        return data
+    }
+
+    public static func decode(from data: Data) throws -> TextSearchHistory {
+        guard data.count <= maximumEncodedBytes else {
+            throw TextSearchHistoryError.encodedDataTooLarge(maximumBytes: maximumEncodedBytes)
+        }
+        return try JSONDecoder().decode(WireHistory.self, from: data).decodedHistory()
+    }
+
+    private init(
+        validatedPresets: [TextSearchPreset],
+        capacity: Int,
+        utf8ByteLimit: Int,
+        retainedUTF8ByteCount: Int
+    ) {
+        self.capacity = capacity
+        self.utf8ByteLimit = utf8ByteLimit
+        presets = validatedPresets
+        self.retainedUTF8ByteCount = retainedUTF8ByteCount
+    }
+
+    private static func preconditionValid(capacity: Int, utf8ByteLimit: Int) {
+        precondition(
+            capacity > 0 && capacity <= maximumCapacity,
+            "Text search history capacity must be between 1 and \(maximumCapacity)"
+        )
+        precondition(
+            utf8ByteLimit > 0 && utf8ByteLimit <= maximumUTF8ByteLimit,
+            "Text search history UTF-8 byte limit must be between 1 and \(maximumUTF8ByteLimit)"
+        )
+    }
+
+    private static func validatedUTF8ByteCount(of preset: TextSearchPreset) throws -> Int {
+        let patternByteCount = preset.query.pattern.text.utf8.count
+        guard patternByteCount <= maximumPatternUTF8Bytes else {
+            throw TextSearchHistoryError.patternTooLarge(
+                maximumUTF8Bytes: maximumPatternUTF8Bytes
+            )
+        }
+        let replacementByteCount = preset.replacement?.utf8.count ?? 0
+        guard replacementByteCount <= maximumReplacementUTF8Bytes else {
+            throw TextSearchHistoryError.replacementTooLarge(
+                maximumUTF8Bytes: maximumReplacementUTF8Bytes
+            )
+        }
+        let (byteCount, overflow) = patternByteCount.addingReportingOverflow(replacementByteCount)
+        guard !overflow else {
+            throw TextSearchHistoryError.historyTooLarge(
+                maximumUTF8Bytes: maximumUTF8ByteLimit
+            )
+        }
+        return byteCount
+    }
+
+    private func validatePersistedState() throws {
+        guard capacity > 0, capacity <= Self.maximumCapacity else {
+            throw TextSearchHistoryError.invalidCapacity(capacity)
+        }
+        guard utf8ByteLimit > 0, utf8ByteLimit <= Self.maximumUTF8ByteLimit else {
+            throw TextSearchHistoryError.invalidUTF8ByteLimit(utf8ByteLimit)
+        }
+        guard presets.count <= capacity, presets.count <= Self.maximumCapacity else {
+            throw TextSearchHistoryError.tooManyPresets(maximumPresets: capacity)
+        }
+
+        var validatedByteCount = 0
+        for (index, preset) in presets.enumerated() {
+            guard !presets[..<index].contains(preset) else {
+                throw TextSearchHistoryError.duplicatePreset
+            }
+            let byteCount = try Self.validatedUTF8ByteCount(of: preset)
+            guard validatedByteCount <= utf8ByteLimit - byteCount else {
+                throw TextSearchHistoryError.historyTooLarge(maximumUTF8Bytes: utf8ByteLimit)
+            }
+            validatedByteCount += byteCount
+        }
+        guard validatedByteCount == retainedUTF8ByteCount else {
+            throw TextSearchHistoryError.historyTooLarge(maximumUTF8Bytes: utf8ByteLimit)
+        }
+    }
+
+    private mutating func removePreset(at index: Int) {
+        let preset = presets.remove(at: index)
+        let byteCount = preset.query.pattern.text.utf8.count + (preset.replacement?.utf8.count ?? 0)
+        retainedUTF8ByteCount -= byteCount
+    }
+
+    private struct WireHistory: Codable {
+        let schemaVersion: Int
+        let capacity: Int
+        let utf8ByteLimit: Int
+        let presets: [WirePreset]
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case capacity
+            case utf8ByteLimit
+            case presets
+        }
+
+        init(_ history: TextSearchHistory) {
+            schemaVersion = TextSearchHistory.currentSchemaVersion
+            capacity = history.capacity
+            utf8ByteLimit = history.utf8ByteLimit
+            presets = history.presets.map(WirePreset.init)
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            guard schemaVersion == TextSearchHistory.currentSchemaVersion else {
+                throw TextSearchHistoryError.unsupportedSchemaVersion(schemaVersion)
+            }
+
+            capacity = try container.decode(Int.self, forKey: .capacity)
+            guard capacity > 0, capacity <= TextSearchHistory.maximumCapacity else {
+                throw TextSearchHistoryError.invalidCapacity(capacity)
+            }
+            utf8ByteLimit = try container.decode(Int.self, forKey: .utf8ByteLimit)
+            guard utf8ByteLimit > 0,
+                utf8ByteLimit <= TextSearchHistory.maximumUTF8ByteLimit
+            else {
+                throw TextSearchHistoryError.invalidUTF8ByteLimit(utf8ByteLimit)
+            }
+
+            var presetsContainer = try container.nestedUnkeyedContainer(forKey: .presets)
+            if let count = presetsContainer.count, count > capacity {
+                throw TextSearchHistoryError.tooManyPresets(maximumPresets: capacity)
+            }
+            var wirePresets: [WirePreset] = []
+            wirePresets.reserveCapacity(Swift.min(presetsContainer.count ?? capacity, capacity))
+            var decodedPresets: [TextSearchPreset] = []
+            var retainedByteCount = 0
+
+            while !presetsContainer.isAtEnd {
+                guard wirePresets.count < capacity else {
+                    throw TextSearchHistoryError.tooManyPresets(maximumPresets: capacity)
+                }
+                let wirePreset = try presetsContainer.decode(WirePreset.self)
+                let preset = wirePreset.decodedPreset
+                guard !decodedPresets.contains(preset) else {
+                    throw TextSearchHistoryError.duplicatePreset
+                }
+                let byteCount = try TextSearchHistory.validatedUTF8ByteCount(of: preset)
+                guard byteCount <= utf8ByteLimit,
+                    retainedByteCount <= utf8ByteLimit - byteCount
+                else {
+                    throw TextSearchHistoryError.historyTooLarge(
+                        maximumUTF8Bytes: utf8ByteLimit
+                    )
+                }
+                retainedByteCount += byteCount
+                decodedPresets.append(preset)
+                wirePresets.append(wirePreset)
+            }
+            presets = wirePresets
+        }
+
+        func decodedHistory() throws -> TextSearchHistory {
+            let decodedPresets = presets.map(\.decodedPreset)
+            let retainedByteCount = try decodedPresets.reduce(into: 0) { result, preset in
+                result += try TextSearchHistory.validatedUTF8ByteCount(of: preset)
+            }
+            return TextSearchHistory(
+                validatedPresets: decodedPresets,
+                capacity: capacity,
+                utf8ByteLimit: utf8ByteLimit,
+                retainedUTF8ByteCount: retainedByteCount
+            )
+        }
+    }
+
+    private struct WirePreset: Codable {
+        let pattern: String
+        let patternKind: PatternKind
+        let caseSensitive: Bool
+        let wholeWord: Bool
+        let replacement: String?
+        let direction: Direction
+        let wrap: Bool
+
+        init(_ preset: TextSearchPreset) {
+            switch preset.query.pattern {
+            case .literal(let pattern):
+                self.pattern = pattern
+                patternKind = .literal
+            case .regularExpression(let pattern):
+                self.pattern = pattern
+                patternKind = .regularExpression
+            }
+            caseSensitive = preset.query.caseSensitive
+            wholeWord = preset.query.wholeWord
+            replacement = preset.replacement
+            direction = Direction(preset.direction)
+            wrap = preset.wrap
+        }
+
+        var decodedPreset: TextSearchPreset {
+            let decodedPattern: TextSearchPattern =
+                switch patternKind {
+                case .literal: .literal(pattern)
+                case .regularExpression: .regularExpression(pattern)
+                }
+            return TextSearchPreset(
+                query: TextSearchQuery(
+                    pattern: decodedPattern,
+                    caseSensitive: caseSensitive,
+                    wholeWord: wholeWord
+                ),
+                replacement: replacement,
+                direction: direction.decodedDirection,
+                wrap: wrap
+            )
+        }
+    }
+
+    private enum PatternKind: String, Codable {
+        case literal
+        case regularExpression
+    }
+
+    private enum Direction: String, Codable {
+        case forward
+        case backward
+
+        init(_ direction: TextSearchDirection) {
+            switch direction {
+            case .forward: self = .forward
+            case .backward: self = .backward
+            }
+        }
+
+        var decodedDirection: TextSearchDirection {
+            switch self {
+            case .forward: .forward
+            case .backward: .backward
+            }
+        }
+    }
+}
+
 public struct TextSearchLimits: Equatable, Sendable {
     public static let `default` = TextSearchLimits()
 
