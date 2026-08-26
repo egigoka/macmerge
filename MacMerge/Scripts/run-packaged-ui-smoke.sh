@@ -33,9 +33,20 @@ for state_path in \
     fi
 done
 exec 9>>"$runtime_directory/lock"
-chmod 600 "$runtime_directory/lock"
-if ! /usr/bin/lockf -s -t 0 9; then
+if [[ ! -f /dev/fd/9 ]] || [[ ! -O /dev/fd/9 ]]; then
+    echo "Refusing untrusted packaged UI smoke lock: $runtime_directory/lock" >&2
+    exit 1
+fi
+chmod 600 /dev/fd/9
+set +e
+/usr/bin/lockf -s -t 0 9
+lock_status=$?
+set -e
+if [[ "$lock_status" == 75 ]]; then
     echo "Another packaged UI smoke is already running." >&2
+    exit 1
+elif [[ "$lock_status" != 0 ]]; then
+    echo "Could not acquire packaged UI smoke lock (lockf exited $lock_status)." >&2
     exit 1
 fi
 
@@ -67,20 +78,23 @@ if [[ -e "$completion_guard" ]]; then
     exit 1
 fi
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/macmerge-packaged-ui.XXXXXX")
-app="$temporary_root/MacMerge.app"
-staged_driver="$runtime_directory/PackagedUISmoke.staged.$$"
+temporary_root=""
+app=""
+staged_driver=""
 driver_pid=""
 driver_launch_pending=0
 pending_signal=0
 cancellation_watchdog_pid=""
-pid_file="$temporary_root/launched-pids"
-launch_intent="$temporary_root/launch-intent"
-cancellation_file="$temporary_root/cancel"
+watchdog_stop_file=""
+pid_file=""
+launch_intent=""
+cancellation_file=""
 
 # shellcheck disable=SC2329
 cleanup() {
+    local original_status=$?
     local cleanup_status=0
+    local watchdog_pid=""
     set +e
     trap - EXIT
     trap '' INT TERM HUP
@@ -88,39 +102,102 @@ cleanup() {
         echo "Waiting for isolated packaged UI smoke cleanup after interruption." >&2
         wait "$driver_pid" 2>/dev/null || true
     fi
-    if [[ -f "$launch_intent" || -s "$pid_file" ]]; then
-        echo "Packaged UI smoke may have been interrupted with an isolated app launch in flight; preserving $temporary_root." >&2
-        return
+    if [[ "$cancellation_watchdog_pid" =~ ^[0-9]+$ ]]; then
+        watchdog_pid="$cancellation_watchdog_pid"
+        cancellation_watchdog_pid=""
+        if [[ -n "$watchdog_stop_file" ]]; then
+            : > "$watchdog_stop_file"
+        fi
+        wait "$watchdog_pid" 2>/dev/null || true
     fi
-    rm -f "$completion_guard"
+    cancellation_watchdog_pid=""
+    if { [[ -n "$launch_intent" && -f "$launch_intent" ]] \
+        || [[ -n "$pid_file" && -s "$pid_file" ]]; }; then
+        echo "Packaged UI smoke may have been interrupted with an isolated app launch in flight; preserving $temporary_root." >&2
+        cleanup_status=1
+        if [[ "$original_status" != 0 ]]; then
+            exit "$original_status"
+        fi
+        exit "$cleanup_status"
+    fi
+    rm -f "$completion_guard" || cleanup_status=1
     if [[ "$bundle_identifier" == "io.github.egigoka.MacMerge.UISmoke.Automated" ]] \
         && { [[ -e "$container/Data" ]] || [[ -L "$container/Data" ]]; }; then
         echo "Packaged UI smoke driver did not remove isolated data at $container/Data." >&2
         cleanup_status=1
     fi
-    rm -f "$staged_driver"
-    rm -rf "$temporary_root"
-    if [[ "$cleanup_status" != 0 ]]; then
-        exit "$cleanup_status"
+    if [[ -n "$staged_driver" ]]; then
+        rm -f "$staged_driver" || cleanup_status=1
     fi
+    if [[ -n "$temporary_root" ]]; then
+        rm -rf "$temporary_root" || cleanup_status=1
+    fi
+    if [[ "$original_status" != 0 ]]; then
+        exit "$original_status"
+    fi
+    exit "$cleanup_status"
+}
+
+# shellcheck disable=SC2329
+start_cancellation_watchdog() {
+    local watched_pid="$driver_pid"
+    local watched_parent=""
+    local watched_start=""
+    local driver_is_job=0
+    local job_pid=""
+    [[ -n "$watched_pid" ]] || return
+    : > "$cancellation_file"
+    if [[ -n "$cancellation_watchdog_pid" ]]; then
+        return
+    fi
+    cancellation_watchdog_pid="starting"
+    watched_start=$(ps -o lstart= -p "$watched_pid" 2>/dev/null || true)
+    watched_parent=$(ps -o ppid= -p "$watched_pid" 2>/dev/null | tr -d '[:space:]' || true)
+    while IFS= read -r job_pid; do
+        if [[ "$job_pid" == "$watched_pid" ]]; then
+            driver_is_job=1
+            break
+        fi
+    done < <(jobs -pr)
+    if [[ -z "$watched_start" || "$watched_parent" != "$$" || "$driver_is_job" != 1 ]]; then
+        cancellation_watchdog_pid=""
+        return
+    fi
+    (
+        for ((seconds = 0; seconds < 30; seconds++)); do
+            [[ ! -e "$watchdog_stop_file" ]] || exit 0
+            sleep 1
+        done
+        current_parent=$(ps -o ppid= -p "$watched_pid" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$current_parent" == "$$" ]] \
+            && [[ "$(ps -o lstart= -p "$watched_pid" 2>/dev/null || true)" == "$watched_start" ]] \
+            && kill -TERM "$watched_pid" 2>/dev/null; then
+            for ((seconds = 0; seconds < 5; seconds++)); do
+                [[ ! -e "$watchdog_stop_file" ]] || exit 0
+                sleep 1
+            done
+            current_parent=$(ps -o ppid= -p "$watched_pid" 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ "$current_parent" == "$$" ]] \
+                && [[ "$(ps -o lstart= -p "$watched_pid" 2>/dev/null || true)" == "$watched_start" ]]; then
+                kill -KILL "$watched_pid" 2>/dev/null || true
+            fi
+        fi
+    ) &
+    cancellation_watchdog_pid=$!
 }
 
 # shellcheck disable=SC2329
 handle_signal() {
     local status=$1
+    if [[ "$pending_signal" != 0 ]]; then
+        return
+    fi
     if [[ "$driver_launch_pending" == 1 || -n "$driver_pid" ]]; then
         if [[ "$pending_signal" == 0 ]]; then
             pending_signal=$status
         fi
         if [[ -n "$driver_pid" ]]; then
-            : > "$cancellation_file"
-            if [[ -z "$cancellation_watchdog_pid" ]]; then
-                (
-                    sleep 30
-                    kill -TERM "$driver_pid" 2>/dev/null || true
-                ) &
-                cancellation_watchdog_pid=$!
-            fi
+            start_cancellation_watchdog
         fi
         return
     fi
@@ -130,6 +207,14 @@ trap cleanup EXIT
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 trap 'handle_signal 129' HUP
+
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/macmerge-packaged-ui.XXXXXX")
+app="$temporary_root/MacMerge.app"
+staged_driver="$runtime_directory/PackagedUISmoke.staged.$$"
+pid_file="$temporary_root/launched-pids"
+launch_intent="$temporary_root/launch-intent"
+cancellation_file="$temporary_root/cancel"
+watchdog_stop_file="$temporary_root/watchdog-stop"
 
 OUTPUT_DIR="$temporary_root" \
     BUNDLE_IDENTIFIER="$bundle_identifier" \
@@ -173,12 +258,7 @@ driver_launch_pending=1
 driver_pid=$!
 driver_launch_pending=0
 if [[ "$pending_signal" != 0 ]]; then
-    : > "$cancellation_file"
-    (
-        sleep 30
-        kill -TERM "$driver_pid" 2>/dev/null || true
-    ) &
-    cancellation_watchdog_pid=$!
+    start_cancellation_watchdog
 fi
 driver_status=0
 while true; do
@@ -186,16 +266,26 @@ while true; do
     wait "$driver_pid"
     driver_status=$?
     set -e
-    if kill -0 "$driver_pid" 2>/dev/null; then
+    driver_running=0
+    while IFS= read -r job_pid; do
+        if [[ "$job_pid" == "$driver_pid" ]]; then
+            driver_running=1
+            break
+        fi
+    done < <(jobs -pr)
+    if [[ "$driver_running" == 1 ]]; then
         continue
     fi
     break
 done
 driver_pid=""
-if [[ -n "$cancellation_watchdog_pid" ]]; then
-    kill "$cancellation_watchdog_pid" 2>/dev/null || true
-    wait "$cancellation_watchdog_pid" 2>/dev/null || true
+if [[ "$cancellation_watchdog_pid" =~ ^[0-9]+$ ]]; then
+    watchdog_pid="$cancellation_watchdog_pid"
+    cancellation_watchdog_pid=""
+    : > "$watchdog_stop_file"
+    wait "$watchdog_pid" 2>/dev/null || true
 fi
+cancellation_watchdog_pid=""
 if [[ "$pending_signal" != 0 ]]; then
     exit "$pending_signal"
 fi

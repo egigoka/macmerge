@@ -115,14 +115,14 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [MISSING] Table Compare and `IDD_OPEN_TABLE`: spreadsheet rendering, table header/filter menu, delimiters, quote/newline settings, and table-specific options.
 - [MISSING] Hex/Binary Compare: native hex panes, byte editing, binary find/replace/go-to, character sets, per-pane status, and binary settings.
 - [MISSING] Image Compare: multipage panes, location/tool pane, differences, block size, threshold, insertion detection, transforms, zoom, overlay, wipe, animation, OCR, and image status.
-- [MISSING] Webpage Compare: browser panes, location/tool pane, screenshot/HTML/text/resource modes, viewport presets, synchronized events, browsing-data controls, and dependency handling.
+- [PARTIAL] Reviewed and tested bounded offline three-way webpage snapshot comparison normalizes rendered text/source mappings, reports deterministic outcomes/ranges, validates stale context, and limits work/output; browser panes, location/tool pane, screenshot/resource modes, viewport presets, synchronized events, browsing-data controls, and app routing remain missing.
 - [MISSING] Folder Compare: recursive scan, table/tree results, state icons, columns, filters, sorting, method selection, file actions, progress/pause/cancel, and file-pair opening.
 
 ### Main menus and command surfaces
 
 - [PARTIAL] File menu: New Text, pair Open, Save/Save Left/Save Right, Save Left/Right As, Merge Mode, Reload, and guarded Quit exist; all remaining `IDR_MERGEDOCTYPE` File commands are mapped in the command audits below.
 - [PARTIAL] Edit menu: native field editing, focus-routed model undo/redo, Select/Previous Line Difference, row context numbered copy, and Options exist; search, markers, multi-row/global numbered copy, bookmarks, and go-to remain missing.
-- [MISSING] View menu: font, zoom, syntax, diff context, whitespace/EOL/line differences/numbers/margins/wrap, pane swap/split/lock, toolbar choices, and dockable pane visibility.
+- [PARTIAL] View menu groundwork now includes reviewed and tested bounded editor display preferences plus canonical two/three-pane layout, swapping, split fractions, and persistence; app/menu wiring for font, zoom, syntax, pane swap/split/lock, whitespace/EOL/line differences/numbers/margins/wrap, toolbar choices, and dockable pane visibility remains missing.
 - [PARTIAL] Merge menu: two-way cursor-relative navigation and copying exist; conflicts, three-way commands, Auto Merge, selected-line operations, and synchronization points are incomplete.
 - [MISSING] Tools menu: Filters, Generate Patch, Generate Report, and Generate Archive.
 - [MISSING] Plugins menu: settings, prediffers, unpackers, editor/copy scripts, transforms, and reload.
@@ -152,7 +152,7 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [PARTIAL] `IDD_SAVECLOSING`: native save/discard/cancel adaptation exists, and packaged dirty-close Cancel smoke preserves exact comparison/Settings windows, content, dirty state, and undo history; independent per-side choices and broader UI tests remain missing.
 - [PARTIAL] `IDD_LOAD_SAVE_CODEPAGE` and `IDD_ENCODINGERROR`: ambiguity selection exists; pane scope, load/save code pages, BOM controls, and recovery actions are incomplete.
 - [MISSING] `IDD_EDIT_FIND`, `IDD_EDIT_REPLACE`, `IDD_EDIT_MARKER`, and `IDD_WMGOTO`.
-- [PARTIAL] Tested core text search covers bounded literal/regex search, forward/backward wrapping, Unicode whole-word and grapheme-safe UTF-16 ranges, replace current/all, zero-length progress, and markers; find/replace/marker dialogs and editor wiring remain.
+- [PARTIAL] Reviewed and tested core text search, named markers, and atomic text replacement cover bounded literal/regex search, forward/backward wrapping, Unicode whole-word and grapheme-safe UTF-16 ranges, strict marker persistence, zero-length progress, capture expansion, cancellation, and exact stale-snapshot validation; find/replace/marker dialogs and editor wiring remain.
 - [PARTIAL] Reviewed and tested row-level two-way comparison statistics core distinguishes unavailable move analysis from zero moves; statistics dialogs and three-way statistics remain. `IDD_DIRCOLS`, `IDD_DIRADDITIONALPROPS`, `IDD_DIRCOMP_PROGRESS`, `IDD_CONFIRM_COPY`, and `IDD_SELECT_FILES_OR_FOLDERS` remain missing.
 - [MISSING] `IDD_GENERATE_PATCH`, `IDD_DIRCMP_REPORT`, `IDD_FILECMP_REPORT`, and `IDD_ARCHIVE`.
 - [PARTIAL] `IDD_FILTERS_LINEFILTERS` and `IDD_FILTERS_SUBSTITUTIONFILTERS`: Settings supports enable state, ordered regex rules, case sensitivity, replacements, remove/clear, validation, persistence, and recomparison; file/condition/result/match-inside/shared/private/test-filter dialogs remain missing.
@@ -182,10 +182,10 @@ A row is complete only after placement, action wiring, result, enablement, check
 - [MISSING] File and folder comparison reports with formats, clipboard output, linked file reports, and open-after-generation.
 - [MISSING] Patch Generator with file selection, style/context, append, clipboard, command line, and external editor.
 - [PARTIAL] Tested bounded core report and unified-patch generators cover safe CSV/HTML/text output, unified hunk ranges, missing final newlines, reverse patches, and Git-compatible quoted paths; dialogs, clipboard/file workflows, append, and external-editor integration remain.
-- [MISSING] Archive Generator with report/patch/project inclusion and file/clipboard output.
+- [PARTIAL] Reviewed and tested plan-only archive core validates selected sources through pinned descriptor-relative identity, strict cross-platform paths, bounded digest/work/output rules, and secure extraction permissions; archive creation, report/patch/project inclusion, file/clipboard output, and UI remain missing.
 - [PARTIAL] Filter settings include line/substitution editors; file filters, condition builders, comparison-result filters, expression helpers, and dedicated test dialogs remain missing.
 - [MISSING] Plugin manager/editor/selector, unpacker/prediffer selection, automatic/manual modes, editor/copy scripts, macros, settings, and reload.
-- [UNKNOWN] Plugin architecture adaptation: define a sandboxed, permission-aware extension model or document intentional unsupported scope before implementation.
+- [PARTIAL] Reviewed and tested external-tool policy defines opt-in direct execution with canonical executable identity plus trusted SHA-256, pinned bounded verification, typed arguments, scoped filesystem access, default-deny ambient capabilities, and explicit unsupported in-process/plugin-reload behavior; executor and user-facing plugin/tool workflows remain missing.
 
 ### Navigation, merge, and pane controls
 
@@ -231,8 +231,8 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] `ID_FILE_NEW3_TABLE`: create a three-pane table comparison.
 - [ ] `ID_FILE_NEW3_HEX`: create a three-pane binary/hex comparison.
 - [ ] `ID_FILE_NEW3_IMAGE`: create a three-pane image comparison.
-- [ ] `ID_FILE_NEW3_WEBPAGE`: create a three-pane webpage comparison.
-- [ ] `ID_FILE_NEW3_FOLDER`: create a three-pane folder comparison.
+- [-] `ID_FILE_NEW3_WEBPAGE`: reviewed and tested bounded offline three-way webpage comparison core exists; document/browser routing and UI remain.
+- [-] `ID_FILE_NEW3_FOLDER`: reviewed and tested deterministic three-way folder snapshot comparison core covers presence/type/content conflicts, digest compatibility, cancellation, summaries, and navigation; scanner/results integration and UI remain.
 - [-] `ID_FILE_OPEN`: pair-level primary picker and left/right replacement exist; add WinMerge's full Open view and recent-path behavior.
 - [x] `ID_FILE_OPEN`: present a split-button/menu indicator for pair Open plus left/right replacement actions.
 - [-] `ID_FILE_OPENCONFLICT`: bounded Git two-way/diff3 conflict parsing with marker-width, malformed-input, label, range, and line-ending coverage passes 22 focused tests; file-open routing and conflict UI remain.
@@ -322,7 +322,7 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [ ] Open, Open Conflict File, and Open Clipboard.
 - [ ] Open Project and Save Project.
 - [-] Save, Save Left/Right, and Save Left/Right As exist; middle-pane variants await three-way comparison.
-- [ ] Print, Page Setup, and Print Preview using native macOS printing.
+- [-] Reviewed and tested bounded two/three-pane print planning covers validated page geometry, imageable clipping, dynamic line-number widths, row splitting, headers/footers, page ranges, preview plans, and cancellation; native AppKit print/page-setup/preview UI remains missing.
 - [-] Left/Right Read-Only state passes menu/header model and packaged AX persistence smoke; middle-pane state awaits three-way comparison.
 - [-] Convert Line Endings core handles whole-document or selected-line CRLF/LF/CR conversion while preserving unrelated terminators, final-newline state, encoding/BOM, and dirty-state semantics across 17 focused tests; menu/editor wiring remains.
 - [x] Merge Mode persists, exposes checked `F9` state and status, and maps unmodified arrows to merge/navigation while modified arrows retain editor behavior.
@@ -344,11 +344,11 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 
 ### View menu
 
-- [ ] Font selection, default font, zoom in/out/normal.
+- [-] Reviewed and tested bounded editor display-preference core covers validated font descriptors, default monospaced font, zoom in/out/normal, display toggles, syntax language, and strict versioned persistence; View menu, font panel, and editor application remain missing.
 - [ ] Syntax highlighting scheme selection.
 - [-] Diff context All/0/1/3/5/7/9, toggle, and invert have bounded row/hunk/gap projection, selection mapping, invalid-line safety, and 19 focused tests; view/menu wiring and persistence remain.
 - [ ] Lock Panes, View Whitespace, View EOL, View Line Differences, View Line Numbers, View Margins, Top Margins, and Wrap Lines.
-- [ ] Swap panes and vertical/horizontal split behavior.
+- [-] Reviewed and tested canonical two/three-pane layout core covers visual permutations, owner-preserving swaps, vertical/horizontal orientation, constrained split fractions, legacy migration, and strict persistence; comparison-window integration remains missing.
 - [ ] Toolbar visibility, size, overflow, and customization.
 - [ ] Status, detail, location, output, and display-filter panes.
 - [x] Refresh with `F5` semantics.
@@ -362,12 +362,12 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 - [x] Copy All Left and Copy All Right.
 - [ ] Auto Merge.
 - [PARTIAL] Reviewed and tested synchronization-point core supports add, remove, clear, validation, edit remapping, bounded decode, and bidirectional mapping; editor commands and persistence integration remain.
-- [ ] Ensure menu and toolbar invoke one shared command implementation and one shared enabled-state implementation.
+- [-] Reviewed and tested shared command-state core covers two/three-pane menu/toolbar enablement, lifecycle, visual-order copy routing, save/read-only state, conflict/difference navigation, and exact toolbar mapping; production menu/toolbar adoption remains missing.
 
 ### Tools, Plugins, Window, and Help menus
 
 - [ ] Filters, Generate Patch, Generate Report, and Generate Archive.
-- [ ] Define macOS replacement or explicit unsupported status for unpackers, prediffers, editor scripts, copying scripts, and plugin reload.
+- [-] External-tool policy core now defines a reviewed default-deny direct-executable replacement and explicit unsupported in-process extensions/plugin reload; executor, trust UI, persistence, and unpacker/prediffer/editor/copy workflow integration remain missing.
 - [-] Native Close plus two-pane Change Pane exist; Close All, Split, Tile, and multi-window navigation remain missing.
 - [PARTIAL] Reviewed and tested bounded deterministic Configuration report core drives Help > Copy Configuration Report with runtime/build/options metadata, checked pasteboard writes, native errors, adjacent/overlap-safe private-path redaction, app tests, and packaged smoke. Help, Release Notes, Translations, license, and complete About MacMerge remain missing.
 - [ ] Add menu validation tests for title, order, shortcut, checked state, enabled state, target action, and result.
@@ -556,7 +556,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 ## Current Work Order
 
-1. Inventory the concurrent unreviewed core additions and temporary `lane*-build` directories, repair current compile failures without discarding unrelated work, then resume implementation review/fix/test waves from verified ownership boundaries. CP1255 source wiring exists but still needs an independent mapping oracle, lifecycle tests, review, and integrated gates before joining the verified list.
+1. Integrate the accepted UI-independent three-way folder/webpage, printing, display-preference, pane-layout, archive-planning, external-tool-policy, command-state, marker, and replacement cores into app/document/menu workflows incrementally. Keep CP1255 outside verified encoding claims until its independent mapping oracle and stale lifecycle expectations are repaired.
 2. Finish Location Pane parity: two-pane map, significant-difference blocks, selected marker, viewport shading, click/drag and AX slider navigation, wheel forwarding, moved connectors/navigation, adjustable accessibility/width, general context commands, persisted resized width, model tests, dark/increased-contrast screenshots, authorized automated packaged AX/runtime checks, and gated sparse/dense packaged performance are complete; add three-pane bars after three-way comparison UI exists.
 3. Expand xdiff fixture parity through remaining comment syntaxes and Windows differential-oracle coverage; exact moved-and-edited subranges, MATLAB, Properties, TOML, raw-byte substitutions, blank-line combinations, adjacent hunks, and overlapping-rule precedence are complete.
 4. Expand legacy code-page coverage beyond verified CP932/CP51932/CP50220/CP1250/CP1251/CP1252/CP1253/CP1254 mappings; keep unsupported mappings fail-closed.
@@ -574,7 +574,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] The 250,000-line alternating changed/unchanged packaged gate passes with exactly 125,000 Location Map runs: 318 ms load, 364 ms comparison, 117 ms first row, 80 ms Location Pane render, 155 ms verified bottom scroll, and 371,146,752 resident bytes (353 MiB) against a 450 MiB ceiling on `VirtualMac2,1`, macOS 26.5.1 build 25F80.
 - [x] CP1254 Turkish decoding, exact Unicode Consortium byte mapping, undefined-byte rejection, fresh encoding, automatic ambiguity ordering, unrepresentable-edit failure, document save/reload, session persistence, and decoded-byte comparison behavior pass focused warnings-as-errors coverage. Full warnings-as-errors tests and release build, formatting, CI-quality, extension-design, and `git diff --check` pass.
 - [PAUSED] Later ten-tranche residual work modified the current worktree after the verified gates above. Rename/syntax focused repairs pass 86 tests, session-state repairs pass 26, and conflict/policy repairs pass 35; final numbered-copy passes 31, Difference Detail 22, and Configuration Report 41. A strict debug build and `git diff --check` passed after these edits. Final rereviews were clean for synchronization/numbered-copy, conflict/policy, and Difference Detail/configuration-report; rename/syntax rereview was cancelled, and session rereview reported a disputed DEL escaped-size overcount that requires direct encoder verification. No new full-suite, release, packaging, or exact-current count is claimed.
-- [PAUSED] Dense Location Pane packaged-gate implementation and its 1,409-XCTest/22-Swift-Testing verification are recorded above. The final smoke-runner lock portability edit now uses an atomic private lock directory and still needs post-edit static and packaged-runtime verification next session.
+- [x] Dense Location Pane packaged-gate implementation and its 1,409-XCTest/22-Swift-Testing verification are recorded above. The smoke runner uses the documented descriptor-mode macOS `lockf` contract with explicit contention/error handling; post-edit static checks, descriptor/contender probes, and final critical review pass. Full packaged runtime smoke was not rerun for this lock-only change.
 - [PAUSED] Requested 10-agent implementation/review/fix/test pipeline stopped during implementation wave 1. Numbered multi-row selection and synchronization-point persistence agents completed source-only changes; one Difference Detail agent returned after an isolated check, while seven implementation agents were cancelled. No 10-agent review, bug-fix, test-writing, test-review, or test-fix wave ran. Current worktree also contains concurrent unreviewed core additions and must be inventoried before claiming ownership or verification; temporary `lane*-build` harnesses remain untracked and must not be committed.
 
 ## Verification Update: 2026-08-19
@@ -583,3 +583,15 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [PAUSED] Nine other implementation calls were aborted, while concurrent unreviewed source files and edits remain in the worktree. No review, bug-fix, test-writing, test-review, or test-fix wave ran. Resume by inventorying ownership and compile state; do not commit `MacMerge/lane*-build/` scratch directories.
 
 - [PAUSED] A new requested 10-agent implementation/review/fix/test cycle stopped during its first implementation dispatch. Nine planned source files are present for three-way table, binary, and image comparison; offline webpage comparison; automatic and multi-difference text merge; filename filtering; WinMerge project files; and unified patch application. The three-way folder comparison file is absent. Only the multi-difference merge lane returned explicit isolated warnings-as-errors build and format success; presence of the other files is not accepted as verification. No review, bug-fix, test-writing, test-review, or test-fix wave ran. Before resuming, inventory all concurrent modified/untracked files, exclude temporary `MacMerge/lane*-build` directories, review each owned source addition, then run focused and integrated gates.
+
+## Verification Update: 2026-08-25
+
+- [x] Requested six-wave cycle completed 10 independent core implementations, 10 implementation reviews, repeated production repair/re-review lanes, 10 focused test-writing lanes, 10 independent test reviews, and 10 test-repair lanes. The accepted scope is UI-independent groundwork for three-way folder/webpage comparison, print planning, editor display preferences, pane layout, archive planning, external-tool policy, shared command state, named markers, and text replacement; no app/UI parity is claimed.
+- [x] Combined warnings-as-errors focused gate passes 217 XCTest cases with 1 filesystem-capability skip and 0 failures: folder 18, webpage 16, printing 25, display preferences 16, pane layout 17, archive 27, external policy 23, command state 19, markers 30, and replacement 26. All 20 new source/test files pass strict `swift-format` lint.
+- [x] `swift build -c release -Xswiftc -warnings-as-errors`, packaged-smoke Swift 6 warnings-as-errors typecheck, Bash syntax, ShellCheck, and `git diff --check` pass. Packaged-smoke lock acquisition now uses the documented descriptor-mode macOS `lockf` contract, distinguishes contention from operational failure, preserves uncertain launches, passes descriptor/contender probes, and has a clean final critical review; full packaged runtime smoke was not rerun for this lock-only change.
+- [!] Full warnings-as-errors test execution compiles but is not green: 1,627 XCTest cases ran with 5 skips and 13 assertion failures across seven pre-existing test cases, plus 22 Swift Testing cases passed. Failures are stale CP1255 ambiguity/lifecycle expectations, existing-project replacement behavior, conflict-navigation metadata validation, and xdiff provenance pins; none of the failing source/test files overlap this cycle's 20 new files. Repository-wide formatting also remains red on pre-existing unrelated tracked tests, while all cycle-owned files are strict-clean.
+
+## Verification Update: 2026-08-26
+
+- [PAUSED] A new requested six-wave cycle completed 10 source-only implementation lanes for Go To, display-filter presets/history, per-pane text status, backup policy, message-box preferences, editor color schemes, unified comparison-open requests, recent workspace history, window/tab command state, and Help catalog. Ten independent implementation reviews ran, followed by one complete repair pass and 10 fresh re-reviews. `TextGoTo.swift` passed both reviews and adversarial runtime probes; the other nine files still have fresh second-review findings. The requested second repair pass was canceled when work stopped. No test-writing, test-review, test-repair, or integrated gate wave ran. These 10 source files remain uncommitted and are excluded from the `v0.1.0` release tag.
+- [!] This machine has no Developer ID Application identity and no `MacMergeNotary` Keychain profile, so `v0.1.0` can only be published as a source release. Do not attach or describe an ad-hoc archive as a notarized production binary.
