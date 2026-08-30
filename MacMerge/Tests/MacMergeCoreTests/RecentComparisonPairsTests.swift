@@ -9,8 +9,8 @@ final class RecentComparisonPairsTests: XCTestCase {
 
     func testPairCanonicalizesStandardizedAbsoluteFileURLs() throws {
         let pair = try RecentComparisonPair(
-            left: URL(string: "file:///inputs/./nested/../left.txt")!,
-            right: URL(string: "file:///inputs/right/../right.txt")!,
+            left: URL(string: "file:///inputs/./left.txt")!,
+            right: URL(string: "file:///inputs/./right.txt")!,
             kind: .file
         )
 
@@ -119,7 +119,7 @@ final class RecentComparisonPairsTests: XCTestCase {
         XCTAssertTrue(
             try history.record(
                 left: URL(string: "file://LOCALHOST/inputs/./left.txt")!,
-                right: URL(string: "file:///inputs/nested/../right.txt")!,
+                right: URL(string: "file:///inputs/./right.txt")!,
                 kind: .file
             )
         )
@@ -243,6 +243,18 @@ final class RecentComparisonPairsTests: XCTestCase {
         XCTAssertEqual(decoded.pairs, [folderPair, filePair])
     }
 
+    func testPairDecodesLegacyFixtureWithoutKindAsFile() throws {
+        let fixture = Data(
+            #"{"left":"file:///legacy/left.txt","right":"file:///legacy/right.txt"}"#.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(RecentComparisonPair.self, from: fixture)
+
+        XCTAssertEqual(decoded.kind, .file)
+        XCTAssertEqual(decoded.left, canonicalURL("/legacy/left.txt", kind: .file))
+        XCTAssertEqual(decoded.right, canonicalURL("/legacy/right.txt", kind: .file))
+    }
+
     func testPairRejectsHostileURLsAtInitializationAndDecode() throws {
         let valid = URL(filePath: "/inputs/valid")
         let serializableInvalidURLs = [
@@ -287,6 +299,73 @@ final class RecentComparisonPairsTests: XCTestCase {
             try decoder.decode(RecentComparisonPair.self, from: invalidRightData),
             descriptionContaining: "Invalid recent comparison URL: \(invalidRight.absoluteString).",
             context: invalidRight.absoluteString
+        )
+    }
+
+    func testPairRejectsRawPercentDecodedAndSymlinkParentComponentsAtInitializationAndDecode() throws {
+        let valid = URL(filePath: "/inputs/valid")
+        let base = FileManager.default.temporaryDirectory.appending(
+            path: "RecentComparisonPairsTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let root = base.appending(path: "root", directoryHint: .isDirectory)
+        let outside = base.appending(path: "outside", directoryHint: .isDirectory)
+        let link = root.appending(path: "link", directoryHint: .notDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        defer { try? FileManager.default.removeItem(at: base) }
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), outside.path)
+
+        let linkString = link.absoluteString.hasSuffix("/") ? String(link.absoluteString.dropLast()) : link.absoluteString
+        let invalidURLs = [
+            URL(string: "file:///inputs/../escape")!,
+            URL(string: "file:///inputs/%2e%2e/escape")!,
+            URL(string: "file:///inputs/..")!,
+            URL(string: "file:///inputs/%2e%2e")!,
+            URL(string: "file:///inputs/%2e./escape")!,
+            URL(string: "file:///inputs/.%2e/escape")!,
+            URL(string: "file:///inputs/%2e%2e%2fescape")!,
+            URL(string: "\(linkString)/../escape")!,
+            URL(string: "\(linkString)/%2e%2e/escape")!
+        ]
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        for invalidURL in invalidURLs {
+            assertInvalidPairURL(invalidURL, valid: valid)
+            assertInvalidPairURL(invalidURL, valid: valid, invalidOnRight: true)
+            assertDataCorrupted(
+                try decoder.decode(
+                    RecentComparisonPair.self,
+                    from: encoder.encode(PairWire(left: invalidURL, right: valid, kind: .file))
+                ),
+                descriptionContaining: "Invalid recent comparison URL: \(invalidURL.absoluteString).",
+                context: invalidURL.absoluteString
+            )
+            assertDataCorrupted(
+                try decoder.decode(
+                    RecentComparisonPair.self,
+                    from: encoder.encode(PairWire(left: valid, right: invalidURL, kind: .folder))
+                ),
+                descriptionContaining: "Invalid recent comparison URL: \(invalidURL.absoluteString).",
+                context: invalidURL.absoluteString
+            )
+        }
+    }
+
+    func testPairAcceptsLiteralDoubleEncodedTraversalTextAtInitializationAndDecode() throws {
+        let encoded = URL(string: "file:///inputs/%252e%252e%252fleft")!
+        let valid = URL(filePath: "/inputs/right")
+        let pair = try RecentComparisonPair(left: encoded, right: valid, kind: .file)
+
+        XCTAssertEqual(pair.left.absoluteString, encoded.absoluteString)
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                RecentComparisonPair.self,
+                from: JSONEncoder().encode(PairWire(left: encoded, right: valid, kind: .file))
+            ),
+            pair
         )
     }
 
@@ -392,6 +471,23 @@ final class RecentComparisonPairsTests: XCTestCase {
         )
     }
 
+    func testDecodeRejectsUnknownCountContainerAtOneThousandEntryGuard() throws {
+        let maximum = RecentComparisonPairs.maximumCapacity
+        let counter = RecentComparisonPairDecodeCounter()
+        let decoder = UnknownCountRecentComparisonPairsDecoder(
+            capacity: 1,
+            pairs: Array(repeating: try pair(0, root: "/unknown-count"), count: maximum + 1),
+            counter: counter
+        )
+
+        assertDataCorrupted(
+            try RecentComparisonPairs(from: decoder),
+            codingKey: "pairs",
+            descriptionContaining: "Recent comparison history cannot exceed 1000 entries."
+        )
+        XCTAssertEqual(counter.count, maximum)
+    }
+
     func testDecodeRejectsHostileTrailingPairAfterCapacityIsFilled() throws {
         let valid = PairWire(try pair(0, root: "/capacity-one"))
         let hostileURL = URL(string: "file://remote.invalid/trailing")!
@@ -418,7 +514,7 @@ final class RecentComparisonPairsTests: XCTestCase {
             kind: .file
         )
         let equivalentFirst = PairWire(
-            left: URL(string: "file://LOCALHOST/history/nested/../left-0")!,
+            left: URL(string: "file://LOCALHOST/history/./left-0")!,
             right: URL(string: "file:///history/./right-0")!,
             kind: .file
         )
@@ -601,4 +697,144 @@ private struct PairWire: Encodable {
 private struct HistoryWire: Encodable {
     let capacity: Int
     let pairs: [PairWire]
+}
+
+private struct UnknownCountRecentComparisonPairsDecoder: Decoder {
+    let capacity: Int
+    let pairs: [RecentComparisonPair]
+    let counter: RecentComparisonPairDecodeCounter
+    let codingPath: [any CodingKey] = []
+    let userInfo: [CodingUserInfoKey: Any] = [:]
+
+    func container<Key: CodingKey>(keyedBy type: Key.Type) throws
+        -> KeyedDecodingContainer<Key>
+    {
+        KeyedDecodingContainer(
+            UnknownCountRecentComparisonPairsKeyedContainer<Key>(
+                capacity: capacity,
+                pairs: pairs,
+                counter: counter
+            )
+        )
+    }
+
+    func unkeyedContainer() throws -> any UnkeyedDecodingContainer {
+        throw unsupportedRecentComparisonPairsDecodingType([Any].self)
+    }
+
+    func singleValueContainer() throws -> any SingleValueDecodingContainer {
+        throw unsupportedRecentComparisonPairsDecodingType(RecentComparisonPairs.self)
+    }
+}
+
+private struct UnknownCountRecentComparisonPairsKeyedContainer<Key: CodingKey>:
+    KeyedDecodingContainerProtocol
+{
+    let capacity: Int
+    let pairs: [RecentComparisonPair]
+    let counter: RecentComparisonPairDecodeCounter
+    let codingPath: [any CodingKey] = []
+    var allKeys: [Key] { [] }
+
+    func contains(_ key: Key) -> Bool {
+        key.stringValue == "capacity" || key.stringValue == "pairs"
+    }
+
+    func decodeNil(forKey key: Key) throws -> Bool { false }
+
+    func decode<T: Decodable>(_ type: T.Type, forKey key: Key) throws -> T {
+        guard key.stringValue == "capacity", let decoded = capacity as? T else {
+            throw unsupportedRecentComparisonPairsDecodingType(type, codingPath: codingPath + [key])
+        }
+        return decoded
+    }
+
+    func nestedUnkeyedContainer(forKey key: Key) throws -> any UnkeyedDecodingContainer {
+        guard key.stringValue == "pairs" else {
+            throw DecodingError.keyNotFound(
+                key,
+                .init(codingPath: codingPath, debugDescription: "Unknown key")
+            )
+        }
+        return UnknownCountRecentComparisonPairsUnkeyedContainer(
+            pairs: pairs,
+            counter: counter,
+            codingPath: codingPath + [key]
+        )
+    }
+
+    func nestedContainer<NestedKey: CodingKey>(
+        keyedBy type: NestedKey.Type,
+        forKey key: Key
+    ) throws -> KeyedDecodingContainer<NestedKey> {
+        throw unsupportedRecentComparisonPairsDecodingType(type, codingPath: codingPath + [key])
+    }
+
+    func superDecoder() throws -> any Decoder {
+        throw unsupportedRecentComparisonPairsDecodingType(RecentComparisonPairs.self)
+    }
+
+    func superDecoder(forKey key: Key) throws -> any Decoder {
+        throw unsupportedRecentComparisonPairsDecodingType(
+            RecentComparisonPairs.self,
+            codingPath: codingPath + [key]
+        )
+    }
+}
+
+private struct UnknownCountRecentComparisonPairsUnkeyedContainer: UnkeyedDecodingContainer {
+    let pairs: [RecentComparisonPair]
+    let counter: RecentComparisonPairDecodeCounter
+    let codingPath: [any CodingKey]
+    var count: Int? { nil }
+    var isAtEnd: Bool { currentIndex == pairs.count }
+    private(set) var currentIndex = 0
+
+    mutating func decodeNil() throws -> Bool { false }
+
+    mutating func decode<T: Decodable>(_ type: T.Type) throws -> T {
+        guard currentIndex < pairs.count else {
+            throw DecodingError.valueNotFound(
+                type,
+                .init(codingPath: codingPath, debugDescription: "No remaining pairs")
+            )
+        }
+        guard let pair = pairs[currentIndex] as? T else {
+            throw unsupportedRecentComparisonPairsDecodingType(type, codingPath: codingPath)
+        }
+        currentIndex += 1
+        counter.count += 1
+        return pair
+    }
+
+    mutating func nestedContainer<NestedKey: CodingKey>(
+        keyedBy type: NestedKey.Type
+    ) throws -> KeyedDecodingContainer<NestedKey> {
+        throw unsupportedRecentComparisonPairsDecodingType(type, codingPath: codingPath)
+    }
+
+    mutating func nestedUnkeyedContainer() throws -> any UnkeyedDecodingContainer {
+        throw unsupportedRecentComparisonPairsDecodingType([Any].self, codingPath: codingPath)
+    }
+
+    mutating func superDecoder() throws -> any Decoder {
+        throw unsupportedRecentComparisonPairsDecodingType(
+            RecentComparisonPair.self,
+            codingPath: codingPath
+        )
+    }
+}
+
+private final class RecentComparisonPairDecodeCounter {
+    var count = 0
+}
+
+private func unsupportedRecentComparisonPairsDecodingType(
+    _ type: Any.Type,
+    codingPath: [any CodingKey] = []
+) -> DecodingError {
+    .typeMismatch(
+        type,
+        .init(codingPath: codingPath, debugDescription: "Unsupported test decode")
+    )
 }

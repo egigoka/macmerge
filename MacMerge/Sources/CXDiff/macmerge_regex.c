@@ -2,6 +2,7 @@
 #include "macmerge_xdiff.h"
 #include "../../../Externals/poco/dependencies/pcre2/src/pcre2.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,6 +21,10 @@ typedef struct mmx_line_filter {
     pcre2_code *code;
     pcre2_match_context *match_context;
 } mmx_line_filter;
+
+/* A previously invalid result shell requests match status without changing the legacy call. */
+static const size_t regex_match_status_request = (size_t)-1;
+static const size_t regex_match_status_flag = (size_t)1 << (sizeof(size_t) * CHAR_BIT - 1);
 
 static int configure_match_limits(pcre2_match_context *context) {
     if (pcre2_set_match_limit(context, MMX_REGEX_MATCH_LIMIT) != 0 ||
@@ -137,8 +142,13 @@ int32_t mmx_regex_substitute(
     pcre2_match_context *match_context;
     uint32_t options = PCRE2_MULTILINE | (case_sensitive ? 0 : PCRE2_CASELESS);
     int status;
+    int matched = 0;
+    int report_match;
 
-    if (result == NULL || result->bytes != NULL || result->size != 0) return MMX_REGEX_MATCH_ERROR;
+    if (result == NULL || result->bytes != NULL) return MMX_REGEX_MATCH_ERROR;
+    report_match = result->size == regex_match_status_request;
+    if (!report_match && result->size != 0) return MMX_REGEX_MATCH_ERROR;
+    result->size = 0;
     if ((subject == NULL && subject_size != 0) || (pattern == NULL && pattern_size != 0) ||
         (replacement == NULL && replacement_size != 0)) return MMX_REGEX_MATCH_ERROR;
     if (subject_size > maximum_size) return MMX_REGEX_OUTPUT_TOO_LARGE;
@@ -233,6 +243,7 @@ int32_t mmx_regex_substitute(
         current_size = next_size;
         current_capacity = next_capacity;
         offset = resume;
+        matched = 1;
     }
 
 cleanup:
@@ -244,7 +255,7 @@ cleanup:
         return status;
     }
     result->bytes = current;
-    result->size = current_size;
+    result->size = current_size | (report_match && matched ? regex_match_status_flag : 0);
     return 0;
 }
 

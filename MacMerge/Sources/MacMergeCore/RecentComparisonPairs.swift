@@ -65,27 +65,49 @@ public struct RecentComparisonPair: Codable, Equatable, Hashable, Sendable {
     }
 
     private static func canonicalURL(_ url: URL, kind: Kind) throws -> URL {
-        guard url.isFileURL,
-            url.baseURL == nil,
-            url.query == nil,
-            url.fragment == nil,
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-            components.scheme?.lowercased() == "file",
-            components.host?.isEmpty != false
-                || components.host?.caseInsensitiveCompare("localhost") == .orderedSame,
-            components.user == nil,
-            components.password == nil,
-            components.port == nil,
-            url.path.hasPrefix("/"),
-            !url.path(percentEncoded: false).utf8.contains(0)
-        else {
+        guard let path = validatedRecentFileURLPath(url) else {
             throw RecentComparisonPairError.invalidURL(url.absoluteString)
         }
 
         return URL(
-            fileURLWithPath: url.standardizedFileURL.path,
+            fileURLWithPath: path,
             isDirectory: kind == .folder
         ).standardizedFileURL
+    }
+}
+
+func validatedRecentFileURLPath(_ url: URL) -> String? {
+    guard url.isFileURL,
+        url.baseURL == nil,
+        url.query == nil,
+        url.fragment == nil,
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+        components.scheme?.lowercased() == "file",
+        components.host?.isEmpty != false
+            || components.host?.caseInsensitiveCompare("localhost") == .orderedSame,
+        components.user == nil,
+        components.password == nil,
+        components.port == nil
+    else {
+        return nil
+    }
+
+    let rawPath = url.path(percentEncoded: true)
+    let decodedPath = url.path(percentEncoded: false)
+    guard rawPath.hasPrefix("/"),
+        decodedPath.hasPrefix("/"),
+        !decodedPath.utf8.contains(0),
+        !containsParentDirectoryComponent(rawPath),
+        !containsParentDirectoryComponent(decodedPath)
+    else {
+        return nil
+    }
+    return decodedPath
+}
+
+private func containsParentDirectoryComponent(_ path: String) -> Bool {
+    path.utf8.split(separator: 0x2F).contains { component in
+        component.count == 2 && component.allSatisfy { $0 == 0x2E }
     }
 }
 
