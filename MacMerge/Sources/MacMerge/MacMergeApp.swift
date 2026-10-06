@@ -507,6 +507,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     private weak var comparisonWindow: NSWindow?
     private var comparisonWindowFrame: NSRect?
     private var comparisonWindowDelegate: ComparisonWindowDelegateProxy?
+    private var comparisonWindowZoomMonitor: Any?
     private weak var comparisonWindowPendingDiscard: NSWindow?
     private weak var comparisonWindowApprovedToClose: NSWindow?
     private var openComparisonWindow: (@MainActor () -> Void)?
@@ -798,7 +799,62 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         comparisonWindowFrame = window.frame
         comparisonWindowDelegate = delegate
         window.delegate = delegate
+        // Custom header replaces the native title bar, so let empty content
+        // areas drag the window like a title bar. Double-click zoom is handled
+        // by a local event monitor below: SwiftUI tap gestures never see the
+        // second click on an inactive window (first click only activates), so
+        // AppKit-level clickCount detection keeps parity with native title bars.
+        window.isMovableByWindowBackground = true
+        installComparisonWindowZoomMonitor(for: window)
         applyPendingRestoredWindowFrame()
+    }
+
+    /// Zoom on double-click in the empty header strip. Buttons keep their own
+    /// behavior: any hit inside an NSButton (file controls, toolbar, traffic
+    /// lights) falls through untouched.
+    private func installComparisonWindowZoomMonitor(for window: NSWindow) {
+        removeComparisonWindowZoomMonitor()
+        comparisonWindowZoomMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .leftMouseDown
+        ) { [weak self, weak window] event in
+            guard let window, event.window === window, event.clickCount == 2
+            else { return event }
+            guard let contentView = window.contentView,
+                let superview = contentView.superview
+            else { return event }
+            let inContent = contentView.convert(event.locationInWindow, from: nil)
+            let bounds = contentView.bounds
+            // SwiftUI hosting views are flipped: y grows downward.
+            let fromTop =
+                contentView.isFlipped ? inContent.y : bounds.maxY - inContent.y
+            // ComparisonHeader is 64pt tall at the top of the content.
+            guard fromTop >= 0, fromTop <= 64,
+                inContent.x >= bounds.minX,
+                inContent.x <= bounds.maxX
+            else { return event }
+            // Traffic lights overlay the top-left corner of the content.
+            if inContent.x < 90, fromTop < 30 { return event }
+            let inSuperview = superview.convert(event.locationInWindow, from: nil)
+            guard let hit = contentView.hitTest(inSuperview) else { return event }
+            var ancestor: NSView? = hit
+            while let view = ancestor {
+                if view is NSButton { return event }
+                ancestor = view.superview
+            }
+            self?.zoomComparisonWindow()
+            return nil
+        }
+    }
+
+    private func removeComparisonWindowZoomMonitor() {
+        if let monitor = comparisonWindowZoomMonitor {
+            NSEvent.removeMonitor(monitor)
+            comparisonWindowZoomMonitor = nil
+        }
+    }
+
+    func zoomComparisonWindow() {
+        comparisonWindow?.zoom(nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -1259,6 +1315,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func detachComparisonWindowDelegate() {
+        removeComparisonWindowZoomMonitor()
         guard let delegate = comparisonWindowDelegate else {
             comparisonWindow = nil
             return

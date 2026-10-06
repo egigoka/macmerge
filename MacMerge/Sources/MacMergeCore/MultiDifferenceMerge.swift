@@ -46,11 +46,6 @@ public struct MultiDifferenceMergeOptions: Equatable, Sendable {
         maximumOutputBytes: Int = MultiDifferenceMergeOptions.defaultMaximumOutputBytes,
         maximumWork: Int = MultiDifferenceMergeOptions.defaultMaximumWork
     ) {
-        precondition(maximumComparedRows >= 0, "Maximum compared row count must not be negative")
-        precondition(maximumChangeGroups >= 0, "Maximum change group count must not be negative")
-        precondition(maximumMergeOperations >= 0, "Maximum merge operation count must not be negative")
-        precondition(maximumOutputBytes >= 0, "Maximum output size must not be negative")
-        precondition(maximumWork >= 0, "Maximum work must not be negative")
         self.lineDiff = lineDiff
         self.maximumComparedRows = maximumComparedRows
         self.maximumChangeGroups = maximumChangeGroups
@@ -110,7 +105,16 @@ public enum MultiDifferenceMergeOutcome: Equatable, Sendable {
     case noChange(MultiDifferenceMergeNoOpReason)
 }
 
+public enum MultiDifferenceMergeLimit: Equatable, Sendable {
+    case comparedRows
+    case changeGroups
+    case mergeOperations
+    case outputBytes
+    case work
+}
+
 public enum MultiDifferenceMergeError: Error, LocalizedError, Equatable, Sendable {
+    case invalidLimit(MultiDifferenceMergeLimit, value: Int)
     case tooManyComparedRows(maximumRows: Int)
     case tooManyChangeGroups(maximumGroups: Int)
     case tooManyMergeOperations(maximumOperations: Int)
@@ -119,6 +123,16 @@ public enum MultiDifferenceMergeError: Error, LocalizedError, Equatable, Sendabl
 
     public var errorDescription: String? {
         switch self {
+        case .invalidLimit(.comparedRows, let value):
+            "Maximum compared row count must not be negative: \(value)."
+        case .invalidLimit(.changeGroups, let value):
+            "Maximum change group count must not be negative: \(value)."
+        case .invalidLimit(.mergeOperations, let value):
+            "Maximum merge operation count must not be negative: \(value)."
+        case .invalidLimit(.outputBytes, let value):
+            "Maximum output size must not be negative: \(value)."
+        case .invalidLimit(.work, let value):
+            "Maximum work must not be negative: \(value)."
         case .tooManyComparedRows(let maximumRows):
             "Multi-difference merge exceeds the \(maximumRows)-row comparison limit."
         case .tooManyChangeGroups(let maximumGroups):
@@ -140,7 +154,22 @@ public enum MultiDifferenceMerge: Sendable {
         direction: MergeDirection,
         options: MultiDifferenceMergeOptions = MultiDifferenceMergeOptions()
     ) throws -> MultiDifferenceMergeOutcome {
+        try plan(
+            state: state,
+            selectedAlignedRows: selection,
+            direction: direction,
+            options: options
+        )
+    }
+
+    public static func plan(
+        state: MultiDifferenceMergeState,
+        selectedAlignedRows selection: Range<Int>,
+        direction: MergeDirection,
+        options: MultiDifferenceMergeOptions = MultiDifferenceMergeOptions()
+    ) throws -> MultiDifferenceMergeOutcome {
         try Task.checkCancellation()
+        try validate(options)
 
         if let reason = disabledReason(
             state: state,
@@ -276,6 +305,39 @@ public enum MultiDifferenceMerge: Sendable {
                 throw MultiDifferenceMergeError.workLimitExceeded(maximumWork: maximum)
             }
             consumed += amount
+        }
+    }
+
+    private static func validate(_ options: MultiDifferenceMergeOptions) throws {
+        guard options.maximumComparedRows >= 0 else {
+            throw MultiDifferenceMergeError.invalidLimit(
+                .comparedRows,
+                value: options.maximumComparedRows
+            )
+        }
+        guard options.maximumChangeGroups >= 0 else {
+            throw MultiDifferenceMergeError.invalidLimit(
+                .changeGroups,
+                value: options.maximumChangeGroups
+            )
+        }
+        guard options.maximumMergeOperations >= 0 else {
+            throw MultiDifferenceMergeError.invalidLimit(
+                .mergeOperations,
+                value: options.maximumMergeOperations
+            )
+        }
+        guard options.maximumOutputBytes >= 0 else {
+            throw MultiDifferenceMergeError.invalidLimit(
+                .outputBytes,
+                value: options.maximumOutputBytes
+            )
+        }
+        guard options.maximumWork >= 0 else {
+            throw MultiDifferenceMergeError.invalidLimit(
+                .work,
+                value: options.maximumWork
+            )
         }
     }
 

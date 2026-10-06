@@ -446,9 +446,10 @@ public struct MultiDifferenceSelection: Equatable, Sendable {
         budget: inout WorkBudget,
         result: inout BuildResult
     ) throws {
-        let intersection = max(runRange.lowerBound, selection.lowerBound)
-            ..< min(runRange.upperBound, selection.upperBound)
-        guard !intersection.isEmpty else { return }
+        let intersectionLowerBound = max(runRange.lowerBound, selection.lowerBound)
+        let intersectionUpperBound = min(runRange.upperBound, selection.upperBound)
+        guard intersectionLowerBound < intersectionUpperBound else { return }
+        let intersection = intersectionLowerBound..<intersectionUpperBound
         guard result.differenceRuns.count < limits.maximumDifferenceRuns else {
             throw MultiDifferenceSelectionError.tooManyDifferenceRuns(
                 maximumRuns: limits.maximumDifferenceRuns
@@ -535,16 +536,17 @@ public struct MultiDifferenceSelection: Equatable, Sendable {
 
         let hasLeft = id.leftNumber != nil
         let hasRight = id.rightNumber != nil
-        let hasValidShape = switch row.kind {
-        case .unchanged:
-            hasLeft || hasRight
-        case .modified:
-            hasLeft && hasRight
-        case .removed:
-            hasLeft && !hasRight
-        case .added:
-            !hasLeft && hasRight
-        }
+        let hasValidShape =
+            switch row.kind {
+            case .unchanged:
+                hasLeft || hasRight
+            case .modified:
+                hasLeft && hasRight
+            case .removed:
+                hasLeft && !hasRight
+            case .added:
+                !hasLeft && hasRight
+            }
         guard hasValidShape else {
             throw MultiDifferenceSelectionError.invalidRowShape(
                 rowIndex: rowIndex,
@@ -594,8 +596,8 @@ private struct WorkBudget {
     }
 }
 
-private extension MultiDifferenceSelectionSide {
-    var description: String {
+extension MultiDifferenceSelectionSide {
+    fileprivate var description: String {
         switch self {
         case .left: "left"
         case .right: "right"
@@ -603,8 +605,8 @@ private extension MultiDifferenceSelectionSide {
     }
 }
 
-private extension DiffKind {
-    var description: String {
+extension DiffKind {
+    fileprivate var description: String {
         switch self {
         case .unchanged: "unchanged"
         case .modified: "modified"
