@@ -25,6 +25,8 @@ required_paths = [
   "MacMerge/**",
   "Externals/xdiff/**",
   "Externals/poco/dependencies/pcre2/**",
+  "Testing/GoogleTest/DiffWrapper/**",
+  "Testing/Data/**",
   ".github/workflows/macmerge.yml",
 ]
 native_dependencies = Dir.glob(File.join(repository_root, "MacMerge/Sources/CXDiff/**/*.{c,h}"))
@@ -52,12 +54,41 @@ abort "quality job must run Scripts/test-ci-quality.sh" unless quality_runs.incl
 abort "quality job must run Scripts/analyze-native.sh" unless quality_runs.include?("Scripts/analyze-native.sh")
 abort "quality job must run Scripts/check-extension-design.sh" unless quality_runs.include?("Scripts/check-extension-design.sh")
 abort "quality job must run ShellCheck" unless quality_runs.include?("shellcheck Scripts/*.sh")
+oracle_step = quality.fetch("steps").find do |step|
+  step.is_a?(Hash) && step["name"] == "Check diff oracle coverage" && step["run"] == "Scripts/check-diff-oracle-coverage.sh"
+end
+abort "quality job must run Scripts/check-diff-oracle-coverage.sh as 'Check diff oracle coverage'" unless oracle_step
+quality_checkout = quality.fetch("steps").find { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/checkout@") }
+abort "quality checkout must use fetch-depth 0 so the diff oracle gate can resolve its pinned commit" \
+  unless quality_checkout && quality_checkout.dig("with", "fetch-depth") == 0
 
 package_job = jobs.fetch("test-and-package")
 needs = Array(package_job.fetch("needs"))
 abort "test-and-package must need quality" unless needs.include?("quality")
 package_runs = package_job.fetch("steps").map { |step| step["run"] if step.is_a?(Hash) }.compact
 abort "test-and-package must package the app" unless package_runs.include?("Scripts/package-app.sh")
+["undefined", "thread"].each do |sanitizer|
+  job_name = "sanitize-#{sanitizer}"
+  sanitizer_job = jobs[job_name]
+  abort "#{job_name} job is missing" unless sanitizer_job.is_a?(Hash)
+  abort "#{job_name} must need quality" unless Array(sanitizer_job["needs"]).include?("quality")
+  abort "#{job_name} must not need test-and-package" if Array(sanitizer_job["needs"]).include?("test-and-package")
+  abort "#{job_name} must set timeout-minutes" unless sanitizer_job["timeout-minutes"].is_a?(Integer)
+  sanitizer_step = sanitizer_job.fetch("steps").find do |step|
+    step.is_a?(Hash) && step["run"] == "Scripts/run-sanitizers.sh #{sanitizer}"
+  end
+  abort "#{job_name} must run Scripts/run-sanitizers.sh #{sanitizer}" unless sanitizer_step
+  filter = sanitizer_step.dig("env", "SANITIZER_TEST_FILTER")
+  abort "#{job_name} must set a focused SANITIZER_TEST_FILTER" unless filter.is_a?(String) && !filter.strip.empty?
+  abort "#{job_name} filter must match MacMergeCoreTests\\.(...)/" unless filter.is_a?(String) && filter.start_with?("MacMergeCoreTests\\.(") && filter.end_with?(")/")
+  if sanitizer == "thread"
+    skip = sanitizer_step.dig("env", "SANITIZER_TEST_SKIP")
+    abort "#{job_name} must skip the xctest re-launch tests with an anchored SANITIZER_TEST_SKIP" \
+      unless skip.is_a?(String) && skip.start_with?("FolderScannerTests/(") && skip.end_with?(")$") &&
+        ["testFollowPolicyStopsDirectoryCycleAndReportsIssue", "testFollowPolicyBoundsSymbolicLinkResolutionCycle"].all? { |name| skip.include?(name) }
+  end
+  abort "test-and-package must not run Scripts/run-sanitizers.sh #{sanitizer}" if package_runs.include?("Scripts/run-sanitizers.sh #{sanitizer}")
+end
 dense_step = package_job.fetch("steps").find do |step|
   step.is_a?(Hash) && step["name"] == "Enforce dense Location Pane packaged budget" && step["run"] == "Scripts/run-performance-budgets.sh"
 end
@@ -102,5 +133,34 @@ fi
 if ! grep -q 'Dereference of null pointer' "$temporary_root/analyzer.log"; then
     fail "analyzer fixture failed without expected warning"
 fi
+
+# The real coverage gate runs as its own workflow step; only its negative self-test lives here.
+oracle_lock="$temporary_root/coverage.lock"
+zero_fingerprint=0000000000000000000000000000000000000000000000000000000000000000
+sed -E "s/^alignment-fingerprint [0-9a-f]{64}\$/alignment-fingerprint $zero_fingerprint/" \
+    "$package_root/DiffOracle/coverage.lock" > "$oracle_lock"
+if cmp -s "$package_root/DiffOracle/coverage.lock" "$oracle_lock"; then
+    fail "diff oracle self-test could not rewrite the alignment fingerprint"
+fi
+if "$package_root/Scripts/check-diff-oracle-coverage.sh" --lock "$oracle_lock" >"$temporary_root/oracle.log" 2>&1; then
+    fail "diff oracle gate accepted an unreviewed alignment change"
+fi
+if ! grep -qF "MacMerge alignment sources changed (fingerprint $zero_fingerprint ->" "$temporary_root/oracle.log"; then
+    fail "diff oracle gate failed without expected alignment diagnostic"
+fi
+
+for unsupported_case in "address:runs as its own CI step" "memory:usage:" "fuzzer:usage:"; do
+    unsupported_sanitizer=${unsupported_case%%:*}
+    expected_diagnostic=${unsupported_case#*:}
+    sanitizer_status=0
+    "$package_root/Scripts/run-sanitizers.sh" "$unsupported_sanitizer" >"$temporary_root/sanitizer.log" 2>&1 \
+        || sanitizer_status=$?
+    if [[ $sanitizer_status -ne 64 ]]; then
+        fail "sanitizer runner exited $sanitizer_status, not 64, for unsupported sanitizer $unsupported_sanitizer"
+    fi
+    if ! grep -qF "$expected_diagnostic" "$temporary_root/sanitizer.log"; then
+        fail "sanitizer runner rejected $unsupported_sanitizer without expected diagnostic: $expected_diagnostic"
+    fi
+done
 
 echo "CI quality self-test passed"

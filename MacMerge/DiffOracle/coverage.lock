@@ -1,0 +1,40 @@
+# MacMerge differential-oracle coverage lock. Reviewed input; see MacMerge/DiffOracle/README.md.
+# Verified by Scripts/check-diff-oracle-coverage.sh in the CI quality job.
+format 1
+fixture-winmerge-commit 7dbede986c2229d5a6273140facc14ae81461a8a
+fixture-xdiff-tree bf7ade8ccf4199ab85649c5aac4474b14e44f55f
+
+alignment-path Externals/poco/dependencies/pcre2/src
+alignment-path Externals/xdiff
+alignment-path MacMerge/Sources/CXDiff
+alignment-path MacMerge/Sources/MacMergeCore/LineDiff.swift
+alignment-path MacMerge/Sources/MacMergeCore/TextFileCodec.swift
+alignment-path MacMerge/Sources/MacMergeCore/TextFileDocument.swift
+alignment-fingerprint ae92d2f5d2e94bec39a2521d1026816f01650c74d6cedcdc38232f70d6064a99
+
+diffwrapper-tree files=1 sha256=b3deb34c34489180f6dd298c2ef28f8c80921d8fc759867f750bd9316da11651
+diffwrapper DiffWrapper.RunFileDiff_IgnoreComments right-file-sites=3 sha256=518dfc3b879c06e52fb0581a16e0140300c7d01a837f102ecb759ff9e7673e9c
+diffwrapper DiffWrapper.RunFileDiff_IgnoreLineBreaks right-file-sites=4 sha256=eb2f8bd5ba9f81334c3c200bb24e14a2fda74189296e79d03d96aa654c57e614
+diffwrapper DiffWrapper.RunFileDiff_IgnoreMissingTrailingEol right-file-sites=6 sha256=8e402ac5e8fbe37f7ccb82989dc29f664bf27b198ae32c8ea465a9424adc9fca
+diffwrapper DiffWrapper.RunFileDiff_LineFilters right-file-sites=3 sha256=1f87e406b498468e63c41fae88a74b2edb8da3cdcb457087534dfffbd717da13
+diffwrapper DiffWrapper.RunFileDiff_NoEol right-file-sites=4 sha256=bbf6828a375e0ae604802ea80b3f810ac1031c145a8b54bf2fa971ad39e4bb3f
+diffwrapper DiffWrapper.RunFileDiff_SubstitutionFilters right-file-sites=2 sha256=4a4b525ca5a9286d5d9fdda315d1ebf99db51e92643a7f67c13d273ab7da22ab
+
+testing-data Codepages required files=3 sha256=0a8f41646090f3a310e4f26f621e96c9bed01773495abdd4d7d84a7763b0b839
+testing-data Compare required files=527 sha256=f35d19fbb792e37b1479482d996439d7c3cdf88f625b9134f1b8ab96b48bb448
+testing-data Compare1 required files=12 sha256=fdb425f75d91412f432107db7faf2fe511f73ebce50f6e4f0c3782a2b46e2fc6
+testing-data Conflict excluded reason=vcs-conflict-generator-scripts
+testing-data Dir2.WinMerge excluded reason=project-file-not-diff-input
+testing-data Dir3.WinMerge excluded reason=project-file-not-diff-input
+testing-data File1.txt excluded reason=unpaired-single-file-load-fixture
+testing-data FileVersion excluded reason=binary-version-resource-folder-compare
+testing-data Fileformats excluded reason=syntax-highlighting-fixture
+testing-data FindText excluded reason=find-text-fixture
+testing-data LastLineEOL required files=9 sha256=58c318acdcf0b5b51114bac7598bc8c3a507957e7137a6dabcfbe838fa7a12e3
+testing-data MoveRenameDetection excluded reason=folder-compare-rename-detection
+testing-data Office excluded reason=binary-office-unpacker-fixture
+testing-data Patch required files=17 sha256=d869cf537bdd2ee4972f13de5c84433cf6a5bd69874329bd31483f7d84093ea9
+testing-data Symlink excluded reason=folder-compare-symlink-fixture
+testing-data Unicode required files=4 sha256=b18f317227333674b0f8c9b4621bf2018e12248929608bdd6f3b38f46cc727f2
+testing-data big_file.conflict excluded reason=conflict-file-parser-fixture
+testing-data dif3.conflict excluded reason=conflict-file-parser-fixture

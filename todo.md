@@ -45,7 +45,7 @@ Acceptance: supported text comparisons match WinMerge fixture results and save w
 - [PARTIAL] Core recursive folder scanner has deterministic ordering, cancellation, hidden/symlink policies, descriptor-relative no-follow traversal, cycle/escape protection, structured errors, and focused tests; background UI integration remains.
 - [PARTIAL] Core folder comparator covers presence, type, size, timestamps, optional required content digests, normalized-path collisions, cancellation, diagnostics, deterministic ordering, and focused tests; directory-window integration remains.
 - [PARTIAL] Core directory result model supports stable IDs, validated side/status invariants, multi-key sorting, filtering, selection persistence, and descriptor-pinned file-pair access with focused tests; results UI remains.
-- [ ] Open selected file pairs in text comparison windows.
+- [-] Open selected file pairs in text comparison windows. Bounded batch planning, a stale-plan-safe open controller, and Merge-menu wiring are tested; menu rendering and VoiceOver remain unverified.
 - [PARTIAL] Folder file-operation planning and dry-run validation cover containment, traversal, aliases/symlinks/special files, collisions, Unicode/case equivalence, overlaps, and read dependencies. Mutating copy/move/delete/synchronize paths deliberately fail closed until descriptor-relative commit/rollback guarantees are complete.
 - [PARTIAL] Reviewed and tested deterministic exact-digest renamed/moved file pairing core exists; folder-results integration remains.
 - [PARTIAL] Deterministic bounded plain-text, fixed-schema CSV, and self-contained HTML report generation exists with escaping, formula neutralization, summaries, and focused tests; folder/file report UI, clipboard, linked reports, and open-after-generation remain.
@@ -221,7 +221,7 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 ### File commands
 
 - [x] `ID_FILE_NEW`: primary action creates a two-pane untitled text comparison.
-- [ ] `ID_FILE_NEW`: present a split-button/menu indicator instead of hiding secondary New actions.
+- [-] `ID_FILE_NEW`: present a split-button/menu indicator instead of hiding secondary New actions. Split-button plan, layout, and New-action dispatch are tested; split-arrow rendering and VoiceOver remain unverified.
 - [-] `ID_FILE_NEW_TABLE`: bounded CSV/TSV/custom-delimiter parsing, row/cell alignment, cancellation, canonical-Unicode matching, and 27 focused tests exist; document routing and table UI remain.
 - [ ] `ID_FILE_NEW_HEX`: create a two-pane binary/hex comparison.
 - [ ] `ID_FILE_NEW_IMAGE`: create a two-pane image comparison.
@@ -307,9 +307,9 @@ Source of truth: `Src/Merge2.rc` `IDR_MAINFRAME`, in exact command order. A comm
 - [ ] Verify every toolbar icon has WinMerge-equivalent tooltip text and shortcut display.
 - [ ] Verify every toolbar control has unique VoiceOver label, value, hint, enabled state, and keyboard focus behavior.
 - [ ] Verify every toolbar action while comparison is empty, loading, equal, different, selected, dirty, read-only, failed, untitled, and externally changed.
-- [ ] Add screenshot/AX regression for exact command order and grouping in a fresh window.
-- [ ] Add screenshot/AX regression for exact command order and grouping in a loaded comparison.
-- [ ] Add interaction tests for primary click, menu-arrow click, menu item selection, keyboard activation, VoiceOver activation, and disabled activation.
+- [-] Add screenshot/AX regression for exact command order and grouping in a fresh window. Command order/grouping is pinned by `ToolbarCommandLayout` tests; screenshot and AX/VoiceOver capture remain missing.
+- [-] Add screenshot/AX regression for exact command order and grouping in a loaded comparison. Command order/grouping is pinned by `ToolbarCommandLayout` tests; screenshot and AX/VoiceOver capture remain missing.
+- [-] Add interaction tests for primary click, menu-arrow click, menu item selection, keyboard activation, VoiceOver activation, and disabled activation. Model-level activation is tested; VoiceOver/AX activation remains missing.
 
 ## Menu Bar Command Audit
 
@@ -375,11 +375,11 @@ Source of truth: `Src/Merge.rc` `IDR_MERGEDOCTYPE`. Every item must be implement
 ## Keyboard Shortcut Audit
 
 - [-] Reviewed and tested keyboard policy reserves native editing keys, canonicalizes physical shifted keys, audits collisions, and routes commands by lifecycle, dirty, selection, read-only, and focus state; complete `Merge.rc` mapping and app event routing remain missing.
-- [ ] Test New `Command-N`, Open `Command-O`, Save `Command-S`, Quit `Command-Q`, and Close `Command-W`.
+- [-] Test New `Command-N`, Open `Command-O`, Save `Command-S`, Quit `Command-Q`, and Close `Command-W`. Shortcut bindings and lane tests pass; `FileLifecycleMenuCapture.verify()` is not called from the app and Close All (`Command-Option-W`) is missing.
 - [-] Packaged smoke verifies Undo `Command-Z` and Redo `Command-Shift-Z` do not consume comparison history while Settings is key and mutate history when comparison is key; focused native-editor routing remains.
-- [ ] Test Next/Previous Difference with `F8`/`F7` and platform-safe equivalents for WinMerge Alt-arrow shortcuts.
+- [-] Test Next/Previous Difference with `F8`/`F7` and platform-safe equivalents for WinMerge Alt-arrow shortcuts. Routing and window tests pass; no live key-press or VoiceOver verification.
 - [ ] Test First/Current/Last Difference equivalents for Alt-Home/Enter/End.
-- [ ] Test directional copy and copy-and-advance without stealing standard word/paragraph navigation from selectable text.
+- [-] Test directional copy and copy-and-advance without stealing standard word/paragraph navigation from selectable text. Router blocks unless the matched commands include the copy command, and Option-arrow keeps word movement in text panes; no live key-press or VoiceOver verification.
 - [x] Select Line Difference `F4`, Refresh `F5`, guarded Reload `Command-F5`, Change Pane `F6`/`Shift-F6`, and Merge Mode `F9` exist.
 - [ ] Test every shortcut in empty, disabled, loading, selected, dirty, and text-focused states.
 
@@ -402,7 +402,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [!] Run the same fixture corpus through MacMerge and byte-diff normalized JSON results in CI; requires the Windows oracle artifacts and hosted CI execution.
 - [ ] Pin the WinMerge commit used to generate each golden result.
 - [ ] Cover every fixture under `Testing/GoogleTest/DiffWrapper` and relevant `Testing/Data` directories.
-- [ ] Fail CI when MacMerge changes alignment without an reviewed WinMerge-oracle update.
+- [x] Fail CI when MacMerge changes alignment without an reviewed WinMerge-oracle update. `Scripts/check-diff-oracle-coverage.sh` fails on alignment-source fingerprint changes and verifies the pinned WinMerge commit and xdiff tree (CI uses `fetch-depth: 0`); run `--refresh` after reviewed alignment changes. Oracle goldens remain pending (see Windows oracle items).
 
 ### Algorithm tests
 
@@ -410,7 +410,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [!] Compare every algorithm against WinMerge on repeated-line and ambiguous-alignment corpora; requires the Windows oracle runner.
 - [x] Cover algorithm fallback and allocation-failure paths with deterministic fault injection across all algorithms, including non-fallback and moved-block paths.
 - [x] Run native allocation-failure sweeps under Address Sanitizer.
-- [ ] Add Undefined Behavior Sanitizer and Thread Sanitizer jobs where supported.
+- [-] Add Undefined Behavior Sanitizer and Thread Sanitizer jobs where supported. `sanitize-undefined` and `sanitize-thread` jobs plus `Scripts/run-sanitizers.sh` are contract-tested; local UBSan run passes 346 tests. Neither job has run on GitHub Actions, timeouts are unmeasured, and two FolderScanner cycle tests are skipped under TSan.
 
 ### Fundamental diff-shape tests
 
@@ -451,7 +451,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 
 - [x] Port moved-block detection and compare moved-source/moved-destination ranges with WinMerge.
 - [x] Cover duplicate moved blocks, WinMerge-exact moved-and-edited subranges, swapped and ambiguous move orientation, option transforms, and moves adjacent to insert/delete hunks.
-- [ ] Port intra-line/word difference ranges.
+- [-] Port intra-line/word difference ranges. `WinMergeStringDiffs` port is tested; `IntraLineDifferenceWorkflow.plan` is not wired to it and no WinMerge-binary comparison exists.
 - [x] Cover Unicode grapheme clusters, combining marks, emoji, tabs, wide glyphs, and code-page text in intra-line ranges.
 - [x] Verify model selection metadata and mounted production editor highlights use the same exact sorted, disjoint UTF-16 ranges and clear them on reuse.
 
@@ -460,7 +460,7 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] UTF-8 with/without BOM and UTF-16 LE/BE with BOM.
 - [x] Fail closed for ambiguous BOM-less UTF-16 and unsupported UTF-32.
 - [-] CP932, CP51932, and CP50220 representative streams; full Windows mapping tables pending.
-- [ ] Run every WinMerge code-page fixture through load, compare, edit, save, reload, and byte comparison.
+- [-] Run every WinMerge code-page fixture through load, compare, edit, save, reload, and byte comparison. `CodePageRoundTripHarness` runs every fixture through all stages with pinned Windows bytes; Foundation writes CP932 ⅰ as `EE EF` (Windows `FA 40`), so edited `FA 40` files fail closed on save.
 - [-] Noncanonical CP932/CP50220 aliases, unrepresentable edits, canonicalized CP50220 output, and explicit CP1250/CP1251/CP1252/CP1253/CP1254 selection are covered; app-level canonicalization warning interaction remains pending.
 - [-] External edits, symlink retargeting, coordinated save races, descriptor-stable bounded reads, binary/text recovery retention, identity-checked quarantine cleanup, missing/symlinked recovery artifacts, and pathless uncertainty have deterministic coverage; same-instruction unlink race elimination and broader cleanup-failure injection remain pending.
 
@@ -652,4 +652,14 @@ Current status: MacMerge **does use WinMerge's bundled `Externals/xdiff` C imple
 - [x] Titlebar double-click zoom fix landed in `MacMerge/Sources/MacMerge/MacMergeApp.swift` as an AppKit local event monitor (installed/removed with comparison-window registration): clickCount==2 in the top 64pt header strip calls `comparisonWindow?.zoom(nil)`; hits inside any NSButton and the top-left 90x30pt traffic-light zone fall through to native behavior. The first SwiftUI `onTapGesture` attempt never fired (verified via container file probe: AX-simulated clicks bypass NSEvent delivery; background/gesture taps never arrived), so the gesture and its view threading were removed in favor of the monitor.
 - [x] Runtime verified with an isolated ad-hoc-signed probe bundle (`io.github.egigoka.MacMerge.ZoomProbe`, separate container, user's dist app untouched): blank-header double-click zooms 1180x720 to standard frame and back; file-button double-click opens the chooser with no zoom; traffic-light zone stays native. Debug warnings-as-errors build, strict `swift-format` lint on the touched file, `git diff --check`, and MacMergeAppTests (181 pass, 2 skipped) all green.
 - [!] Pre-existing behavior found during verification, unchanged by this fix: single-pressing the green traffic-light button enters fullscreen (AXFullScreen=true) instead of standard zoom; only the AXZoomWindow action performs standard zoom. Native titlebar double-click parity for the blank header now holds, including from an inactive window (first press activates, second completes clickCount==2).
+- [!] Developer ID Application identity and `MacMergeNotary` Keychain profile remain external blockers; no notarized production binary is claimed.
+
+## Verification Update: 2026-10-29
+
+- [x] Requested six-wave cycle ran 10 implementation lanes, 10 production reviews, production fixes, 10 test-writing lanes, 10 test reviews, test fixes, and a final gate per lane, with reruns where a gate failed: selected-file-pair opening, toolbar New split button, toolbar command layout, file lifecycle shortcuts, difference navigation shortcuts, directional copy shortcuts, diff-oracle coverage gate, UBSan/TSan CI jobs, WinMerge string diffs, and code-page round-trip harness. A shortcut-coverage-audit budget flake was also fixed (hash-order canonicalization runs before the metered sort and is not charged to the budget).
+- [x] All 10 final gates pass with Swift 6 warnings-as-errors builds, strict `swift-format` lint by explicit path, and focused tests: selected-file-pair opening 68, toolbar split button 37, toolbar command layout 59, file lifecycle shortcuts 73, difference navigation 42, directional copy 44, diff-oracle coverage 61, sanitizer CI contract 7, string diffs 44, code-page round-trip harness 77.
+- [x] Combined warnings-as-errors build (including tests) is clean with 0 warnings. Combined focused run of all lane and shared shortcut suites passes 610 tests except the stale keyboard-shortcut policy inventory, which is now fixed: the test expected Undo/Redo to require a dirty document, but WinMerge enables them from the undo stack (`CMergeEditView::OnUpdateEditUndo`). `Scripts/check-diff-oracle-coverage.sh` passes without `--refresh`.
+- [!] Full suite completes 4,827 XCTest cases with 5 skips and 15 failures (1 unexpected) before the policy test fix; 14 remain, all in suites no lane touched: CP1253/CP1255 code-page ambiguity expectations (CodePageLifecycleMatrix, CodePageLifecycleRegression, Windows1253, Windows1253Recovery), existing-project replacement, conflict-navigation metadata validation, verification-evidence ledger chronology, and xdiff provenance pins.
+- [!] Repo-wide `Scripts/check-format.sh` reports 973 lint errors in 39 committed files untouched by this cycle; all cycle files lint clean.
+- [!] Open gaps: no live key-press, menu-rendering, screenshot, AX, or VoiceOver verification for any lane; Close All (`Command-Option-W`) missing; `FileLifecycleMenuCapture.verify()` never called; `IntraLineDifferenceWorkflow.plan` not wired to the string-diff port; sanitizer jobs not yet run on GitHub Actions; CP932 ⅰ codec divergence (`EE EF` vs Windows `FA 40`).
 - [!] Developer ID Application identity and `MacMergeNotary` Keychain profile remain external blockers; no notarized production binary is claimed.

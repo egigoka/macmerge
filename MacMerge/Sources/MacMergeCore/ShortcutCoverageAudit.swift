@@ -1957,26 +1957,36 @@ public enum ShortcutCoverageAudit: Sendable {
             binding(
                 "new-command-n",
                 .comparison(.newComparison),
-                .character("n"),
-                [.command],
+                FileLifecycleShortcuts.key(.new),
+                FileLifecycleShortcuts.modifiers(.new),
                 requirement: PolicyRequirement(enabledLifecycleStates: workspace)
             ),
             binding(
                 "open-command-o",
                 .comparison(.openComparison),
-                .character("o"),
-                [.command],
+                FileLifecycleShortcuts.key(.open),
+                FileLifecycleShortcuts.modifiers(.open),
                 requirement: PolicyRequirement(enabledLifecycleStates: workspace)
             ),
             binding(
                 "save-command-s",
                 .comparison(.save),
-                .character("s"),
-                [.command],
+                FileLifecycleShortcuts.key(.save),
+                FileLifecycleShortcuts.modifiers(.save),
                 requirement: writableWorkspace
             ),
-            binding("quit-command-q", .quit, .character("q"), [.command]),
-            binding("close-command-w", .close, .character("w"), [.command]),
+            binding(
+                "quit-command-q",
+                .quit,
+                FileLifecycleShortcuts.key(.quit),
+                FileLifecycleShortcuts.modifiers(.quit)
+            ),
+            binding(
+                "close-command-w",
+                .close,
+                FileLifecycleShortcuts.key(.close),
+                FileLifecycleShortcuts.modifiers(.close)
+            ),
             binding(
                 "undo-command-z", .comparison(.undo), .character("z"), [.command],
                 requirement: editableWorkspace
@@ -4009,7 +4019,9 @@ extension ShortcutCoverageAudit {
             }
             let sortBudget = budget
             let identities = try boundedSorted(
-                Array(Set(expectedCounts.keys).union(actualCounts.keys)),
+                shortcutCoverageHashOrderCanonicalized(
+                    Array(Set(expectedCounts.keys).union(actualCounts.keys))
+                ) { shortcutCoverageCompareStringArrays($0, $1) < 0 },
                 by: {
                     try shortcutCoverageCompareStringArrays($0, $1, budget: sortBudget) < 0
                 }
@@ -4056,7 +4068,9 @@ extension ShortcutCoverageAudit {
             }
             let sortBudget = budget
             let identities = try boundedSorted(
-                Array(Set(expectedCounts.keys).union(actualCounts.keys)),
+                shortcutCoverageHashOrderCanonicalized(
+                    Array(Set(expectedCounts.keys).union(actualCounts.keys))
+                ) { shortcutCoverageCompareStringArrays($0, $1) < 0 },
                 by: {
                     try shortcutCoverageCompareStringArrays($0, $1, budget: sortBudget) < 0
                 }
@@ -4103,7 +4117,9 @@ extension ShortcutCoverageAudit {
             }
             let sortBudget = budget
             let identities = try boundedSorted(
-                Array(Set(expectedCounts.keys).union(actualCounts.keys)),
+                shortcutCoverageHashOrderCanonicalized(
+                    Array(Set(expectedCounts.keys).union(actualCounts.keys))
+                ) { shortcutCoverageCompareStringArrays($0, $1) < 0 },
                 by: {
                     try shortcutCoverageCompareStringArrays($0, $1, budget: sortBudget) < 0
                 }
@@ -4842,7 +4858,10 @@ extension ShortcutCoverageAudit {
 
         private mutating func sortedIDs(_ values: [StableID]) throws -> [StableID] {
             let sortBudget = budget
-            return try boundedSorted(values) {
+            let canonical = shortcutCoverageHashOrderCanonicalized(values) {
+                shortcutCoverageCompareUTF8($0.rawValue, $1.rawValue) < 0
+            }
+            return try boundedSorted(canonical) {
                 try shortcutCoverageCompareUTF8($0.rawValue, $1.rawValue, budget: sortBudget) < 0
             }
         }
@@ -4859,14 +4878,25 @@ extension ShortcutCoverageAudit {
 
         private mutating func sortedStrings(_ values: [String]) throws -> [String] {
             let sortBudget = budget
-            return try boundedSorted(values) {
+            let canonical = shortcutCoverageHashOrderCanonicalized(values) {
+                shortcutCoverageCompareUTF8($0, $1) < 0
+            }
+            return try boundedSorted(canonical) {
                 try shortcutCoverageCompareUTF8($0, $1, budget: sortBudget) < 0
             }
         }
 
         private mutating func sortedMatrixKeys(_ values: [MatrixKey]) throws -> [MatrixKey] {
             let sortBudget = budget
-            return try boundedSorted(values) { left, right in
+            let canonical = shortcutCoverageHashOrderCanonicalized(values) { left, right in
+                let bindingComparison = shortcutCoverageCompareUTF8(
+                    left.bindingID.rawValue,
+                    right.bindingID.rawValue
+                )
+                if bindingComparison != 0 { return bindingComparison < 0 }
+                return shortcutCoverageCompareUTF8(left.contextID.rawValue, right.contextID.rawValue) < 0
+            }
+            return try boundedSorted(canonical) { left, right in
                 let bindingComparison = try shortcutCoverageCompareUTF8(
                     left.bindingID.rawValue,
                     right.bindingID.rawValue,
@@ -5111,6 +5141,19 @@ extension ShortcutCoverageAudit {
             throw AuditError.invalidLimit(.workUnits)
         }
     }
+}
+
+/// Dictionary keys and Set elements iterate in a per-instance seeded order. A metered merge
+/// sort over that order charges a different number of comparisons on every run, so the
+/// audit's work total (and its minimum passing budget) would drift. Sorting first with an
+/// unmetered comparison makes the metered charge depend only on the values. The unmetered
+/// pass orders the same elements the metered sort then charges for, so it stays within the
+/// same order of work as the metered pass.
+private func shortcutCoverageHashOrderCanonicalized<Element>(
+    _ values: [Element],
+    by areInIncreasingOrder: (Element, Element) -> Bool
+) -> [Element] {
+    values.sorted(by: areInIncreasingOrder)
 }
 
 private func shortcutCoverageCompareUTF8(_ left: String, _ right: String) -> Int {

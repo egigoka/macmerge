@@ -141,7 +141,7 @@ public enum KeyboardShortcutStateMatrix: Sendable {
         public let preservesNativeEditing: Bool
         public let isSystemCommand: Bool
 
-        fileprivate init(
+        init(
             id: ShortcutID,
             chord: Policy.Chord,
             applicationCommand: Policy.Command?,
@@ -731,19 +731,19 @@ extension KeyboardShortcutStateMatrix {
         return [
             ShortcutDescriptor(
                 id: .newCommandN,
-                chord: makeChord(.character("n"), [.command]),
+                chord: FileLifecycleShortcuts.binding(for: .new).chord,
                 applicationCommand: .newComparison,
                 requirement: Requirement(enabledLifecycleStates: workspace)
             ),
             ShortcutDescriptor(
                 id: .openCommandO,
-                chord: makeChord(.character("o"), [.command]),
+                chord: FileLifecycleShortcuts.binding(for: .open).chord,
                 applicationCommand: .openComparison,
                 requirement: Requirement(enabledLifecycleStates: workspace)
             ),
             ShortcutDescriptor(
                 id: .saveCommandS,
-                chord: makeChord(.character("s"), [.command]),
+                chord: FileLifecycleShortcuts.binding(for: .save).chord,
                 applicationCommand: .save,
                 requirement: Requirement(
                     enabledLifecycleStates: workspace,
@@ -753,13 +753,13 @@ extension KeyboardShortcutStateMatrix {
             ),
             ShortcutDescriptor(
                 id: .quitCommandQ,
-                chord: makeChord(.character("q"), [.command]),
+                chord: FileLifecycleShortcuts.binding(for: .quit).chord,
                 applicationCommand: nil,
                 isSystemCommand: true
             ),
             ShortcutDescriptor(
                 id: .closeCommandW,
-                chord: makeChord(.character("w"), [.command]),
+                chord: FileLifecycleShortcuts.binding(for: .close).chord,
                 applicationCommand: nil,
                 isSystemCommand: true
             ),

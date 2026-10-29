@@ -170,12 +170,11 @@ final class KeyboardShortcutPolicyTests: XCTestCase {
             applicationBinding(.newComparison, "command+n", workspace),
             applicationBinding(.openComparison, "command+o", workspace),
             applicationBinding(.save, "command+s", workspace, dirty: true, readOnly: false),
-            applicationBinding(.undo, "command+z", workspace, dirty: true, readOnly: false),
+            applicationBinding(.undo, "command+z", workspace, readOnly: false),
             applicationBinding(
                 .redo,
                 "command+shift+z",
                 workspace,
-                dirty: true,
                 readOnly: false
             ),
             applicationBinding(.selectLineDifference, "f4", differences),

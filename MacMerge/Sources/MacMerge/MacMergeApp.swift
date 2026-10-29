@@ -503,11 +503,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     let model: ComparisonModel
+    let selectedFilePairOpener = SelectedFilePairOpenController()
     private let crashReporter: LocalCrashReporter
     private weak var comparisonWindow: NSWindow?
     private var comparisonWindowFrame: NSRect?
     private var comparisonWindowDelegate: ComparisonWindowDelegateProxy?
     private var comparisonWindowZoomMonitor: Any?
+    private let differenceNavigationKeyRouter = DifferenceNavigationKeyRouter()
+    private let directionalCopyKeyRouter = DirectionalCopyKeyRouter()
     private weak var comparisonWindowPendingDiscard: NSWindow?
     private weak var comparisonWindowApprovedToClose: NSWindow?
     private var openComparisonWindow: (@MainActor () -> Void)?
@@ -806,6 +809,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         // AppKit-level clickCount detection keeps parity with native title bars.
         window.isMovableByWindowBackground = true
         installComparisonWindowZoomMonitor(for: window)
+        differenceNavigationKeyRouter.install(for: window, model: model)
+        directionalCopyKeyRouter.install(for: window, model: model)
         applyPendingRestoredWindowFrame()
     }
 
@@ -1316,6 +1321,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func detachComparisonWindowDelegate() {
         removeComparisonWindowZoomMonitor()
+        differenceNavigationKeyRouter.remove()
+        directionalCopyKeyRouter.remove()
         guard let delegate = comparisonWindowDelegate else {
             comparisonWindow = nil
             return
@@ -1392,15 +1399,20 @@ enum ComparisonCopyCommand: CaseIterable {
         }
     }
 
-    var toolbarLabel: String {
+    var toolbarCommand: ToolbarConfiguration.Command {
         switch self {
-        case .selectedToRight: "Copy selected difference to right"
-        case .selectedToLeft: "Copy selected difference to left"
-        case .selectedToRightAndAdvance: "Copy selected difference to right and advance"
-        case .selectedToLeftAndAdvance: "Copy selected difference to left and advance"
-        case .allToRight: "Copy all differences to right"
-        case .allToLeft: "Copy all differences to left"
+        case .selectedToRight: .copyToRight
+        case .selectedToLeft: .copyToLeft
+        case .selectedToRightAndAdvance: .copyToRightAndAdvance
+        case .selectedToLeftAndAdvance: .copyToLeftAndAdvance
+        case .allToRight: .copyAllToRight
+        case .allToLeft: .copyAllToLeft
         }
+    }
+
+    /// Same table the toolbar renders from, so AX fixtures and the toolbar cannot drift.
+    var toolbarLabel: String {
+        ToolbarCommandLayout.copyTitle(for: toolbarCommand) ?? menuTitle
     }
 
     var direction: MergeDirection {
@@ -1548,18 +1560,26 @@ private struct WinMergeCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Text Comparison", action: applicationDelegate.requestNewComparison)
-                .keyboardShortcut("n", modifiers: .command)
-                .disabled(!model.canCreateEmptyComparison)
-            Button("Open...", action: applicationDelegate.openComparison)
-                .keyboardShortcut("o", modifiers: .command)
-                .disabled(model.isWorking)
+            Button(
+                FileLifecycleShortcuts.binding(for: .new).menuTitle,
+                action: applicationDelegate.requestNewComparison
+            )
+            .fileLifecycleShortcut(.new)
+            .disabled(!model.canCreateEmptyComparison)
+            Button(
+                FileLifecycleShortcuts.binding(for: .open).menuTitle,
+                action: applicationDelegate.openComparison
+            )
+            .fileLifecycleShortcut(.open)
+            .disabled(model.isWorking)
         }
         CommandGroup(replacing: .saveItem) {
-            Button("Save") {
+            FileLifecycleCloseCommand()
+            Divider()
+            Button(FileLifecycleShortcuts.binding(for: .save).menuTitle) {
                 model.saveAllChanges { _ in }
             }
-            .keyboardShortcut("s", modifiers: .command)
+            .fileLifecycleShortcut(.save)
             .disabled(!model.hasUnsavedChanges || model.isWorking)
             Divider()
             Button("Save Left") {
@@ -1625,36 +1645,37 @@ private struct WinMergeCommands: Commands {
                 .disabled(!model.canSelectLineDifference)
         }
         CommandMenu("Merge") {
-            Button("Next Difference", action: model.selectNextDifference)
-                .keyboardShortcut(KeyEquivalent("\u{F70B}"), modifiers: [])
-                .disabled(!model.canSelectNextDifference)
-            Button("Previous Difference", action: model.selectPreviousDifference)
-                .keyboardShortcut(KeyEquivalent("\u{F70A}"), modifiers: [])
-                .disabled(!model.canSelectPreviousDifference)
-            Button("First Difference", action: model.selectFirstDifference)
-                .disabled(!model.canNavigateDifferences)
-            Button("Current Difference", action: model.selectCurrentDifference)
-                .disabled(!model.canSelectCurrentDifference)
-            Button("Last Difference", action: model.selectLastDifference)
-                .disabled(!model.canNavigateDifferences)
+            // Titles, F8/F7 key equivalents, and Option-chord tooltips come from
+            // DifferenceNavigationShortcuts; Option chords are focus-routed by
+            // DifferenceNavigationKeyRouter.
+            ForEach(DifferenceNavigationShortcuts.Command.allCases, id: \.self) { command in
+                Button(command.menuTitle) { model.performDifferenceNavigation(command) }
+                    .differenceNavigationShortcut(command)
+                    .disabled(!model.enabledDifferenceNavigationCommands.contains(command))
+            }
             Divider()
+            // Key equivalents and Option-arrow tooltips come from DirectionalCopyShortcuts.
+            // Option-Left/Right (WinMerge Alt-Left/Right) is focus-routed by
+            // DirectionalCopyKeyRouter so it never steals word navigation from text.
             Button(ComparisonCopyCommand.selectedToRight.menuTitle) {
                 ComparisonCopyCommand.selectedToRight.perform(on: model)
             }
-            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .directionalCopyShortcut(.copyToRight)
             .disabled(!ComparisonCopyCommand.selectedToRight.isEnabled(on: model))
             Button(ComparisonCopyCommand.selectedToLeft.menuTitle) {
                 ComparisonCopyCommand.selectedToLeft.perform(on: model)
             }
-            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .directionalCopyShortcut(.copyToLeft)
             .disabled(!ComparisonCopyCommand.selectedToLeft.isEnabled(on: model))
             Button(ComparisonCopyCommand.selectedToRightAndAdvance.menuTitle) {
                 ComparisonCopyCommand.selectedToRightAndAdvance.perform(on: model)
             }
+            .directionalCopyShortcut(.copyToRightAndAdvance)
             .disabled(!ComparisonCopyCommand.selectedToRightAndAdvance.isEnabled(on: model))
             Button(ComparisonCopyCommand.selectedToLeftAndAdvance.menuTitle) {
                 ComparisonCopyCommand.selectedToLeftAndAdvance.perform(on: model)
             }
+            .directionalCopyShortcut(.copyToLeftAndAdvance)
             .disabled(!ComparisonCopyCommand.selectedToLeftAndAdvance.isEnabled(on: model))
             Divider()
             Button(ComparisonCopyCommand.allToRight.menuTitle) {
@@ -1665,6 +1686,7 @@ private struct WinMergeCommands: Commands {
                 ComparisonCopyCommand.allToLeft.perform(on: model)
             }
             .disabled(!ComparisonCopyCommand.allToLeft.isEnabled(on: model))
+            SelectedFilePairMenuItems(applicationDelegate: applicationDelegate)
         }
         CommandGroup(after: .toolbar) {
             Toggle(
@@ -2913,6 +2935,8 @@ final class ComparisonModel {
     var hasDifferences: Bool { summary.differences > 0 && isComparisonCurrent }
     var hasUnsavedChanges: Bool { left.isDirty || right.isDirty }
     var hasSelectedDifference: Bool { selectedDifferenceID != nil && !isWorking }
+    /// Selected difference, or else the current row when it is a difference (the Merge gate).
+    var hasCurrentDifference: Bool { currentDifferenceID != nil && !isWorking }
     var canMergeCurrentDifference: Bool {
         canMergeCurrentDifference(direction: .leftToRight)
             || canMergeCurrentDifference(direction: .rightToLeft)
@@ -3810,6 +3834,7 @@ final class ComparisonModel {
         guard !isWorking else { return }
         selectedDifferenceID = differenceID(at: differenceRowIndices.startIndex)
         currentRowID = selectedDifferenceID
+        selectedDifferenceRevealRevision &+= 1
     }
 
     func selectCurrentDifference() {
@@ -3898,6 +3923,7 @@ final class ComparisonModel {
         guard !isWorking else { return }
         selectedDifferenceID = differenceRowIndices.indices.last.flatMap(differenceID(at:))
         currentRowID = selectedDifferenceID
+        selectedDifferenceRevealRevision &+= 1
     }
 
     func refresh() {
@@ -5272,6 +5298,37 @@ private struct DifferenceCounter: View {
     }
 }
 
+extension ToolbarCommandLayout.State {
+    /// Toolbar gates read from the comparison model. Internal so app tests can pin the mapping.
+    @MainActor
+    init(model: ComparisonModel, canUndo: Bool, canRedo: Bool) {
+        self.init(
+            isWorking: model.isWorking,
+            isLeftLoaded: model.left.isLoaded,
+            isRightLoaded: model.right.isLoaded,
+            canSaveLeft: ComparisonSaveCommand.left.isEnabled(on: model),
+            canSaveRight: ComparisonSaveCommand.right.isEnabled(on: model),
+            hasUnsavedChanges: model.hasUnsavedChanges,
+            canUndo: canUndo,
+            canRedo: canRedo,
+            canSelectLineDifference: model.canSelectLineDifference,
+            hasNavigableDifferences: model.canNavigateDifferences,
+            canSelectNextDifference: model.canSelectNextDifference,
+            canSelectPreviousDifference: model.canSelectPreviousDifference,
+            canSelectCurrentDifference: model.canSelectCurrentDifference,
+            canCopyToRight: ComparisonCopyCommand.selectedToRight.isEnabled(on: model),
+            canCopyToLeft: ComparisonCopyCommand.selectedToLeft.isEnabled(on: model),
+            canCopyToRightAndAdvance:
+                ComparisonCopyCommand.selectedToRightAndAdvance.isEnabled(on: model),
+            canCopyToLeftAndAdvance:
+                ComparisonCopyCommand.selectedToLeftAndAdvance.isEnabled(on: model),
+            canCopyAllToRight: ComparisonCopyCommand.allToRight.isEnabled(on: model),
+            canCopyAllToLeft: ComparisonCopyCommand.allToLeft.isEnabled(on: model),
+            canRefresh: model.canRefresh
+        )
+    }
+}
+
 private struct ComparisonToolbar: View {
     let model: ComparisonModel
     let undo: () -> Void
@@ -5283,184 +5340,28 @@ private struct ComparisonToolbar: View {
     let openLeft: () -> Void
     let openRight: () -> Void
     let requestMergeAll: (MergeDirection) -> Void
+    @Environment(\.openSettings) private var openSettings
+
+    /// Order, separators, availability, menus, and dispatch all come from `ToolbarCommandLayout`.
+    /// Only `.primaryClick` and `.menuItemSelection` reach `activate`; menu-arrow, keyboard, and
+    /// VoiceOver activation are native SwiftUI behavior (`Interaction.routing`).
+    private var layout: ToolbarCommandLayout {
+        ToolbarCommandLayout.make(
+            state: ToolbarCommandLayout.State(model: model, canUndo: canUndo, canRedo: canRedo)
+        )
+    }
 
     var body: some View {
+        let layout = layout
         HStack(spacing: 7) {
-            Menu("New comparison", systemImage: "doc.badge.plus") {
-                Button("Text", action: requestNew)
-                Divider()
-                Button("Table") {}.disabled(true)
-                Button("Binary") {}.disabled(true)
-                Button("Image") {}.disabled(true)
-                Button("Webpage") {}.disabled(true)
-                Button("Folder") {}.disabled(true)
-                Divider()
-                Menu("New (3 panes)") {
-                    Button("Text") {}.disabled(true)
-                    Button("Table") {}.disabled(true)
-                    Button("Binary") {}.disabled(true)
-                    Button("Image") {}.disabled(true)
-                    Button("Webpage") {}.disabled(true)
-                    Button("Folder") {}.disabled(true)
+            ForEach(Array(layout.slots.enumerated()), id: \.offset) { _, slot in
+                switch slot {
+                case .separator:
+                    toolbarDivider
+                case .control(let control):
+                    controlView(control, in: layout)
                 }
-            } primaryAction: {
-                requestNew()
             }
-            .disabled(!model.canCreateEmptyComparison)
-            .help("Create a new text comparison (Command-N)")
-
-            Menu("Open files", systemImage: "folder") {
-                Button("Open Comparison...", systemImage: "folder", action: openComparison)
-                Divider()
-                Button("Open Left...", systemImage: "rectangle.split.2x1", action: openLeft)
-                Button("Open Right...", systemImage: "rectangle.split.2x1", action: openRight)
-            } primaryAction: {
-                openComparison()
-            }
-            .disabled(model.isWorking)
-            .help("Select files to compare (Command-O)")
-
-            Menu("Save", systemImage: "square.and.arrow.down") {
-                Button("Save Left") {
-                    ComparisonSaveCommand.left.perform(on: model)
-                }
-                .disabled(!ComparisonSaveCommand.left.isEnabled(on: model))
-                Button("Save Right") {
-                    ComparisonSaveCommand.right.perform(on: model)
-                }
-                .disabled(!ComparisonSaveCommand.right.isEnabled(on: model))
-                Divider()
-                Button("Save Left As...", action: { model.saveAs(.left) })
-                    .disabled(!model.left.isLoaded)
-                Button("Save Right As...", action: { model.saveAs(.right) })
-                    .disabled(!model.right.isLoaded)
-            } primaryAction: {
-                model.saveAllChanges { _ in }
-            }
-            .disabled(model.isWorking || (!model.left.isLoaded && !model.right.isLoaded))
-            .help("Save changed files (Command-S)")
-
-            toolbarDivider
-
-            Button("Undo", systemImage: "arrow.uturn.backward", action: undo)
-                .disabled(!canUndo)
-                .help("Undo the last edit or merge")
-            Button("Redo", systemImage: "arrow.uturn.forward", action: redo)
-                .disabled(!canRedo)
-                .help("Redo the last edit or merge")
-
-            toolbarDivider
-
-            Button("Select line difference", systemImage: "character.cursor.ibeam") {
-                model.selectLineDifference()
-            }
-            .disabled(!model.canSelectLineDifference)
-            .help("Select the intra-line difference in the active pane (F4)")
-
-            toolbarDivider
-
-            Button("Next difference", systemImage: "arrow.down", action: model.selectNextDifference)
-                .disabled(!model.canSelectNextDifference)
-                .help("Go to next difference (F8)")
-            Button("Previous difference", systemImage: "arrow.up", action: model.selectPreviousDifference)
-                .disabled(!model.canSelectPreviousDifference)
-                .help("Go to previous difference (F7)")
-
-            toolbarDivider
-
-            Button("Next conflict", systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90") {}
-                .disabled(true)
-                .help("Next conflict is available in three-pane conflict comparisons")
-            Button("Previous conflict", systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90") {}
-                .disabled(true)
-                .help("Previous conflict is available in three-pane conflict comparisons")
-
-            toolbarDivider
-
-            Button("First difference", systemImage: "arrow.up.to.line", action: model.selectFirstDifference)
-                .disabled(!model.canNavigateDifferences)
-                .help("Go to first difference")
-            Button("Current difference", systemImage: "scope", action: model.selectCurrentDifference)
-                .disabled(!model.canSelectCurrentDifference)
-                .help("Reveal the current difference")
-            Button("Last difference", systemImage: "arrow.down.to.line", action: model.selectLastDifference)
-                .disabled(!model.canNavigateDifferences)
-                .help("Go to last difference")
-
-            toolbarDivider
-
-            Button(ComparisonCopyCommand.selectedToRight.toolbarLabel, systemImage: "arrow.right") {
-                ComparisonCopyCommand.selectedToRight.perform(on: model)
-            }
-            .disabled(!ComparisonCopyCommand.selectedToRight.isEnabled(on: model))
-            .help("Copy the selected or current difference to right")
-            Button(ComparisonCopyCommand.selectedToLeft.toolbarLabel, systemImage: "arrow.left") {
-                ComparisonCopyCommand.selectedToLeft.perform(on: model)
-            }
-            .disabled(!ComparisonCopyCommand.selectedToLeft.isEnabled(on: model))
-            .help("Copy the selected or current difference to left")
-
-            Button(
-                ComparisonCopyCommand.selectedToRightAndAdvance.toolbarLabel,
-                systemImage: "arrow.right.circle",
-                action: { ComparisonCopyCommand.selectedToRightAndAdvance.perform(on: model) }
-            )
-            .disabled(!ComparisonCopyCommand.selectedToRightAndAdvance.isEnabled(on: model))
-            .help("Copy selected difference to right and advance")
-            Button(
-                ComparisonCopyCommand.selectedToLeftAndAdvance.toolbarLabel,
-                systemImage: "arrow.left.circle",
-                action: { ComparisonCopyCommand.selectedToLeftAndAdvance.perform(on: model) }
-            )
-            .disabled(!ComparisonCopyCommand.selectedToLeftAndAdvance.isEnabled(on: model))
-            .help("Copy selected difference to left and advance")
-
-            toolbarDivider
-
-            Button(ComparisonCopyCommand.allToRight.toolbarLabel, systemImage: "arrow.right.to.line") {
-                requestMergeAll(ComparisonCopyCommand.allToRight.direction)
-            }
-            .disabled(!ComparisonCopyCommand.allToRight.isEnabled(on: model))
-            .help("Copy all differences to right")
-            Button(ComparisonCopyCommand.allToLeft.toolbarLabel, systemImage: "arrow.left.to.line") {
-                requestMergeAll(ComparisonCopyCommand.allToLeft.direction)
-            }
-            .disabled(!ComparisonCopyCommand.allToLeft.isEnabled(on: model))
-            .help("Copy all differences to left")
-
-            toolbarDivider
-
-            Button("Auto merge", systemImage: "wand.and.stars") {}
-                .disabled(true)
-                .help("Auto Merge is available in clean three-pane comparisons")
-
-            toolbarDivider
-
-            Button("First compared file", systemImage: "backward.end") {}
-                .disabled(true)
-                .help("Compared-file navigation is available from folder comparisons")
-            Button("Previous compared file", systemImage: "backward") {}
-                .disabled(true)
-                .help("Compared-file navigation is available from folder comparisons")
-            Button("Next compared file", systemImage: "forward") {}
-                .disabled(true)
-                .help("Compared-file navigation is available from folder comparisons")
-            Button("Last compared file", systemImage: "forward.end") {}
-                .disabled(true)
-                .help("Compared-file navigation is available from folder comparisons")
-
-            toolbarDivider
-
-            SettingsLink {
-                Label("Options", systemImage: "gearshape")
-            }
-            .help("Open comparison options (Command-,)")
-
-            toolbarDivider
-
-            Button("Refresh", systemImage: "arrow.clockwise", action: model.refresh)
-                .disabled(!model.canRefresh)
-                .help("Recompare the current in-memory text without reloading files")
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
@@ -5472,10 +5373,157 @@ private struct ComparisonToolbar: View {
         .accessibilityLabel("Comparison commands")
     }
 
+    @ViewBuilder
+    private func controlView(
+        _ control: ToolbarCommandLayout.Control, in layout: ToolbarCommandLayout
+    ) -> some View {
+        switch control.kind {
+        case .button:
+            Button(control.title, systemImage: control.systemImage) {
+                activate(.primaryClick, control, in: layout)
+            }
+            .disabled(!control.isEnabled)
+            .help(control.help)
+            .modifier(ComparisonToolbarAccessibility(control: control))
+        case .splitButton:
+            Menu {
+                menuContent(control.menu, of: control, in: layout)
+            } label: {
+                Label(control.title, systemImage: control.systemImage)
+            } primaryAction: {
+                activate(.primaryClick, control, in: layout)
+            }
+            .menuIndicator(.visible)
+            .disabled(!control.isEnabled)
+            .help(control.help)
+            .modifier(ComparisonToolbarAccessibility(control: control))
+        }
+    }
+
+    private func menuContent(
+        _ elements: [ToolbarCommandLayout.MenuElement],
+        of control: ToolbarCommandLayout.Control,
+        in layout: ToolbarCommandLayout
+    ) -> AnyView {
+        AnyView(
+            ForEach(Array(elements.enumerated()), id: \.offset) { _, element in
+                switch element {
+                case .separator:
+                    Divider()
+                case .submenu(_, let title, let children):
+                    Menu(title) {
+                        menuContent(children, of: control, in: layout)
+                    }
+                case .item(let item):
+                    menuItemButton(item, of: control, in: layout)
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func menuItemButton(
+        _ item: ToolbarCommandLayout.MenuItem,
+        of control: ToolbarCommandLayout.Control,
+        in layout: ToolbarCommandLayout
+    ) -> some View {
+        let button = Group {
+            if let systemImage = item.systemImage {
+                Button(item.title, systemImage: systemImage) {
+                    activate(.menuItemSelection(item.id), control, in: layout)
+                }
+            } else {
+                Button(item.title) {
+                    activate(.menuItemSelection(item.id), control, in: layout)
+                }
+            }
+        }
+        .disabled(!item.isEnabled)
+        .accessibilityIdentifier(
+            ToolbarCommandLayout.accessibilityIdentifier(for: item, in: control.command))
+        if let label = item.accessibilityLabel {
+            button.accessibilityLabel(label)
+        } else {
+            button
+        }
+    }
+
+    private func activate(
+        _ interaction: ToolbarCommandLayout.Interaction,
+        _ control: ToolbarCommandLayout.Control,
+        in layout: ToolbarCommandLayout
+    ) {
+        guard let action = layout.dispatch(interaction, to: control.command)?.performedAction
+        else { return }
+        perform(action, in: layout)
+    }
+
+    private func perform(_ action: ToolbarCommandLayout.Action, in layout: ToolbarCommandLayout) {
+        switch action {
+        case .newDocument(let commandID):
+            // Gate on the same set that built the layout's availability.
+            guard layout.state.implementedNewCommands.contains(commandID) else { return }
+            switch commandID {
+            case .twoPaneText:
+                // `requestNew` creates exactly a two-pane text comparison.
+                requestNew()
+            default:
+                assertionFailure("No New route for \(commandID.rawValue)")
+            }
+        case .openComparison: openComparison()
+        case .openLeft: openLeft()
+        case .openRight: openRight()
+        case .saveAllChanges: model.saveAllChanges { _ in }
+        case .saveLeft: ComparisonSaveCommand.left.perform(on: model)
+        case .saveRight: ComparisonSaveCommand.right.perform(on: model)
+        case .saveLeftAs: model.saveAs(.left)
+        case .saveRightAs: model.saveAs(.right)
+        case .undo: undo()
+        case .redo: redo()
+        case .selectLineDifference: model.selectLineDifference()
+        case .nextDifference: model.selectNextDifference()
+        case .previousDifference: model.selectPreviousDifference()
+        case .firstDifference: model.selectFirstDifference()
+        case .currentDifference: model.selectCurrentDifference()
+        case .lastDifference: model.selectLastDifference()
+        case .copyToRight: ComparisonCopyCommand.selectedToRight.perform(on: model)
+        case .copyToLeft: ComparisonCopyCommand.selectedToLeft.perform(on: model)
+        case .copyToRightAndAdvance:
+            ComparisonCopyCommand.selectedToRightAndAdvance.perform(on: model)
+        case .copyToLeftAndAdvance:
+            ComparisonCopyCommand.selectedToLeftAndAdvance.perform(on: model)
+        case .requestCopyAllToRight: requestMergeAll(ComparisonCopyCommand.allToRight.direction)
+        case .requestCopyAllToLeft: requestMergeAll(ComparisonCopyCommand.allToLeft.direction)
+        case .refresh: model.refresh()
+        case .openOptions: openSettings()
+        case .nextConflict, .previousConflict, .autoMerge, .firstComparedFile,
+            .previousComparedFile, .nextComparedFile, .lastComparedFile:
+            // Always disabled in this window.
+            break
+        }
+    }
+
     private var toolbarDivider: some View {
         Divider().frame(height: 18)
     }
 
+}
+
+private struct ComparisonToolbarAccessibility: ViewModifier {
+    let control: ToolbarCommandLayout.Control
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let labeled =
+            content
+            .accessibilityLabel(control.accessibilityLabel ?? control.title)
+            .accessibilityIdentifier(control.accessibilityIdentifier)
+        if let hint = control.accessibilityHint {
+            labeled.accessibilityHint(hint)
+        } else {
+            labeled
+        }
+    }
 }
 
 private struct EmptyComparisonView: View {
@@ -7595,7 +7643,7 @@ private final class LockedLineClipView: NSClipView {
 }
 
 @MainActor
-private final class DiffContextTextView: NSTextView {
+final class DiffContextTextView: NSTextView, SingleLineDiffRowTextView {
     var contextMenuProvider: (() -> NSMenu?)?
     var mergeModeKeyHandler: ((NSEvent) -> Bool)?
     var routesUndoToComparisonHistory = false

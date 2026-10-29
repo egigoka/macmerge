@@ -7,6 +7,8 @@ on:
       - "MacMerge/**"
       - "Externals/xdiff/**"
       - "Externals/poco/dependencies/pcre2/**"
+      - "Testing/GoogleTest/DiffWrapper/**"
+      - "Testing/Data/**"
       - ".github/workflows/macmerge.yml"
       - "todo.md"
   pull_request:
@@ -15,6 +17,8 @@ on:
       - "MacMerge/**"
       - "Externals/xdiff/**"
       - "Externals/poco/dependencies/pcre2/**"
+      - "Testing/GoogleTest/DiffWrapper/**"
+      - "Testing/Data/**"
       - ".github/workflows/macmerge.yml"
       - "todo.md"
 
@@ -31,9 +35,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          # Full history so the diff oracle gate can resolve the pinned WinMerge fixture commit.
+          fetch-depth: 0
 
       - name: Test CI quality contracts
         run: Scripts/test-ci-quality.sh
+
+      - name: Check diff oracle coverage
+        run: Scripts/check-diff-oracle-coverage.sh
 
       - name: Check Swift formatting
         run: Scripts/check-format.sh
@@ -49,6 +59,51 @@ jobs:
 
       - name: Analyze native bridge
         run: Scripts/analyze-native.sh
+
+  sanitize-undefined:
+    needs: quality
+    runs-on: macos-15
+    # Unmeasured: no CI run has timed this job yet. Set to about 2x the first observed wall time.
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: MacMerge
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # UBSan instruments only the CXDiff C target, so only tests that reach it run here.
+      # Each class's code calls CXDiff at runtime (LineDiff, regex substitution or line filters).
+      # SynchronizationPointsTests is excluded: SynchronizationPoints reads only a CXDiff constant.
+      - name: Test CXDiff-backed tests with Undefined Behavior Sanitizer
+        env:
+          SANITIZER_TEST_FILTER: >-
+            MacMergeCoreTests\.(LineDiffTests|XDiffBoundaryContractTests|XDiffRuntimeRouteTests|RegexSafetyTests|RegexContractRegressionTests|CABIContractSafetyTests|CABIFuzzRegressionTests|ExactInputBoundaryTests|InputBoundaryContractTests|DiffInputBoundaryTests|AlgorithmFaultPathTests|AlgorithmRouteParityRegressionTests|AlgorithmFallbackContractTests|MovedTransformBoundaryTests|PatchGeneratorTests|FilterTestEvaluatorTests|RecompareModePlanTests|ComparisonOpenRequestTests|ThreeWayWebPageComparisonTests|AdversarialDiffShapeTests|RandomizedDiffPropertyTests|WinMergeStringDiffsTests)/
+        run: Scripts/run-sanitizers.sh undefined
+
+  sanitize-thread:
+    needs: quality
+    runs-on: macos-15
+    # Unmeasured: no CI run has timed this job yet. Set to about 2x the first observed wall time.
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: MacMerge
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Focused on native diff, regex, folder scanning and comparison session concurrency.
+      # The skipped tests re-launch the xctest bundle, which cannot load TSan with strip_env=1.
+      - name: Test concurrent core paths with Thread Sanitizer
+        env:
+          SANITIZER_TEST_FILTER: >-
+            MacMergeCoreTests\.(LineDiffTests|XDiffRuntimeRouteTests|RegexSafetyTests|RegexContractRegressionTests|FolderScannerTests|FolderComparatorTests|ComparisonSessionStateTests|ArchiveGenerationWorkflowTests|PatchGenerationWorkflowTests|RandomizedDiffPropertyTests)/
+          SANITIZER_TEST_SKIP: >-
+            FolderScannerTests/(testFollowPolicyStopsDirectoryCycleAndReportsIssue|testFollowPolicyBoundsSymbolicLinkResolutionCycle)$
+        run: Scripts/run-sanitizers.sh thread
 
   test-and-package:
     needs: quality

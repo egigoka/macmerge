@@ -139,3 +139,5 @@ MacMerge/lane*-build/
 MacMerge/dist/
 Src/FilterEngine/FilterLexer.cpp
 Src/FilterEngine/FilterParser.c
+MacMerge/final-build/
+MacMerge/audit-build/

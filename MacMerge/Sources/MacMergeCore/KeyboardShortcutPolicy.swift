@@ -730,9 +730,26 @@ public struct KeyboardShortcutPolicy: Equatable, Hashable, Sendable {
         let all = Set(LifecycleState.allCases)
 
         return [
-            shortcut(.newComparison, .character("n"), [.command], workspace),
-            shortcut(.openComparison, .character("o"), [.command], workspace),
-            shortcut(.save, .character("s"), [.command], workspace, dirty: true, readOnly: false),
+            shortcut(
+                .newComparison,
+                FileLifecycleShortcuts.key(.new),
+                FileLifecycleShortcuts.modifiers(.new),
+                workspace
+            ),
+            shortcut(
+                .openComparison,
+                FileLifecycleShortcuts.key(.open),
+                FileLifecycleShortcuts.modifiers(.open),
+                workspace
+            ),
+            shortcut(
+                .save,
+                FileLifecycleShortcuts.key(.save),
+                FileLifecycleShortcuts.modifiers(.save),
+                workspace,
+                dirty: true,
+                readOnly: false
+            ),
             shortcut(.undo, .character("z"), [.command], workspace, readOnly: false),
             shortcut(
                 .redo,

@@ -762,6 +762,13 @@ public struct DirectoryResults: Equatable, Sendable {
         return rootDescriptorStorage?.openableFilePair(for: result)
     }
 
+    /// Opens both sides of `result` beneath the roots pinned when these results were created.
+    /// Unlike `openableFilePair(for:)`, `result` need not be a stored row, so callers can pin
+    /// synthetic pairs such as a combined left-only and right-only selection.
+    func pinnedOpenableFilePair(for result: DirectoryResult) -> DirectoryFilePair? {
+        rootDescriptorStorage?.openableFilePair(for: result)
+    }
+
     public static func == (left: Self, right: Self) -> Bool {
         left.leftRoot == right.leftRoot
             && left.rightRoot == right.rightRoot
