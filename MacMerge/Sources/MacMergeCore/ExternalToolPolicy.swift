@@ -1665,6 +1665,9 @@ extension ExternalToolRequestPlanner {
             let count = buffer.withUnsafeMutableBytes { rawBuffer in
                 Darwin.pread(descriptor, rawBuffer.baseAddress, requestedCount, offset)
             }
+            guard count != 0 else {
+                throw ExternalToolPolicyError.executableIdentityChanged(path)
+            }
             guard count > 0 else {
                 if errno == EINTR { continue }
                 throw ExternalToolPolicyError.executableIdentityChanged(path)
@@ -1704,6 +1707,9 @@ extension ExternalToolRequestPlanner {
                     remainingCount,
                     offset
                 )
+            }
+            guard count != 0 else {
+                throw ExternalToolPolicyError.executableIdentityChanged(path)
             }
             guard count > 0 else {
                 if errno == EINTR { continue }
