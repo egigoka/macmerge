@@ -771,6 +771,9 @@ public struct KeyboardShortcutPolicy: Equatable, Hashable, Sendable {
             shortcut(.firstDifference, .special(.home), [.option], differences),
             shortcut(.currentDifference, .special(.return), [.option], differences),
             shortcut(.lastDifference, .special(.end), [.option], differences),
+            shortcut(.firstDifference, .special(.home), [.command, .option], differences),
+            shortcut(.currentDifference, .special(.return), [.command, .option], differences),
+            shortcut(.lastDifference, .special(.end), [.command, .option], differences),
             shortcut(
                 .copyToRight,
                 .special(.rightArrow),
