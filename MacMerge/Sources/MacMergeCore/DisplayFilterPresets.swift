@@ -855,7 +855,12 @@ public struct DisplayFilterPresets: Equatable, Sendable, RandomAccessCollection 
             )
             try scanner.validate()
         }
-        let wire = try JSONDecoder().decode(DisplayFilterPresetsWireState.self, from: data)
+        let wire: DisplayFilterPresetsWireState
+        do {
+            wire = try JSONDecoder().decode(DisplayFilterPresetsWireState.self, from: data)
+        } catch {
+            throw DisplayFilterPresetsError.invalidJSON
+        }
 
         guard wire.historyCapacity > 0,
             wire.historyCapacity <= limits.maximumHistoryEntries
