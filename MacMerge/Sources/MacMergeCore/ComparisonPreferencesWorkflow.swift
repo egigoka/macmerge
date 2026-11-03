@@ -713,6 +713,24 @@ public struct ComparisonPreferences:
     public var customMirror: Mirror { redactedComparisonPreferencesMirror(self) }
 }
 
+extension ComparisonPreferences {
+    /// SHA-256 of the canonical preferences content (no revision envelope).
+    ///
+    /// Matches the bytes `ComparisonPreferencesWorkflow` hashes into plan
+    /// SHAs, so plan-only adoption can re-verify exact content binding under
+    /// caller limits without touching persistence I/O.
+    internal func canonicalContentSHA256(
+        limits: ComparisonPreferencesWorkflowLimits = .default
+    ) throws -> [UInt8] {
+        var work = 0
+        return try ComparisonPreferencesPersistence.validatedCanonicalContent(
+            self,
+            limits: limits,
+            work: &work
+        ).sha256
+    }
+}
+
 public struct ComparisonPreferencesRevision:
     Codable, Comparable, Equatable, Hashable, Sendable, CustomStringConvertible
 {
@@ -1361,7 +1379,7 @@ package enum ComparisonPreferencesWorkflowTestHooks {
         try await $cancellationCheckpoint.withValue(checkpoint, operation: operation)
     }
 
-    fileprivate static func checkCancellation() throws {
+    package static func checkCancellation() throws {
         try cancellationCheckpoint()
     }
 }
